@@ -1,0 +1,10 @@
+[server]
+base_url = "http://127.0.0.1:8080"
+
+[model]
+name = "gemma"
+temperature = 0.7
+
+[ui]
+title = "Gemma Local Assistant"
+name = "Abi"

@@ -1,0 +1,14 @@
+[project]
+name = "gemma-local"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+  "httpx",
+  "platformdirs",
+  "rich",
+  "textual",
+  "typer",
+]
+
+[project.scripts]
+gemma-local = "app.cli:app"

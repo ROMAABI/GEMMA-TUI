@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.env
+sessions/*.db
+sessions/*.sqlite3
+models/*.gguf
+.DS_Store
+sample.db
