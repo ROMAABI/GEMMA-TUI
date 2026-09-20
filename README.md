@@ -31,12 +31,12 @@
 
 ---
 
-## 🎬 Demo video
+## 🎬 Demo
 
-<video src="assets/demo.mp4" controls width="100%"></video>
+[![Watch demo](assets/demo.gif)](assets/demo.mp4)
 
-> **Watch:** launch → welcome → agent writes code → theme switch.
-> If video doesn't render on your Git host, download [`assets/demo.mp4`](assets/demo.mp4).
+> **Above:** auto-playing preview. Click it (or open [`assets/demo.mp4`](assets/demo.mp4)) for the full-quality video.
+> Launch → welcome → agent writes code → theme switch.
 
 ---
 
