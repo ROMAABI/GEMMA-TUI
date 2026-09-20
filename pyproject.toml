@@ -11,4 +11,8 @@ dependencies = [
 ]
 
 [project.scripts]
+gemma = "app.cli:app"
 gemma-local = "app.cli:app"
+
+[tool.setuptools.packages.find]
+include = ["app*", "config*", "core*", "models*", "sessions*", "tui*", "utils*"]

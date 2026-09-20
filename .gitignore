@@ -8,3 +8,9 @@ sessions/*.sqlite3
 models/*.gguf
 .DS_Store
 sample.db
+brag-output/
+searxng/settings.yml
+test_*.png
+test_*.svg
+real_snapshot.png
+real_snapshot.svg
