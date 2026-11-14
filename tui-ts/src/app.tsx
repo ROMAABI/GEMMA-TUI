@@ -366,6 +366,26 @@ export function App(props: { chat: Chat }) {
       case "/chat":
         void props.chat.setMode("chat")
         return true
+      case "/mcp":
+      case "/skills":
+      case "/lsp": {
+        const service = name.slice(1) as "mcp" | "skills" | "lsp"
+        const sub = arg.toLowerCase() || "status"
+        const valid: Record<string, string[]> = {
+          mcp: ["status", "start", "reload", "stop"],
+          skills: ["list", "reload", "status"],
+          lsp: ["status", "stop"],
+        }
+        if (!valid[service]!.includes(sub)) {
+          flash(`Usage: /${service} ${valid[service]!.join("|")}`)
+          return true
+        }
+        void (async () => {
+          const status = await props.chat.serviceStatus(service, sub === "status" ? "status" : sub)
+          if (status) flash(status.replace(/\n+/g, " · "))
+        })()
+        return true
+      }
       case "/permissions": {
         const [first, ...rest] = arg.split(/\s+/).filter(Boolean)
         const effect = first?.toLowerCase()

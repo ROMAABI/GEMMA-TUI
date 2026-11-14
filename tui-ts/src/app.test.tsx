@@ -198,6 +198,36 @@ function startMock(
         if (body.max_steps !== undefined) info.max_steps = body.max_steps
         return Response.json({ ok: true, workspace: info.workspace, max_steps: info.max_steps })
       }
+      if (path === "/api/mcp/status") {
+        return Response.json({ enabled: true, status: "MCP servers:\n- files: connected (2 tools)" })
+      }
+      if (path === "/api/skills" && request.method === "GET") {
+        return Response.json({ enabled: true, summary: "Available skills:\n- commit: write commits" })
+      }
+      if (path === "/api/lsp/status") {
+        return Response.json({ enabled: true, status: "LSP servers:\n- python: pyright (running)" })
+      }
+      if (
+        ["/api/mcp", "/api/skills", "/api/lsp"].includes(path) &&
+        request.method === "POST"
+      ) {
+        const body = (await request.json()) as { action: string }
+        const service = path.slice(5)
+        const allowed: Record<string, string[]> = {
+          mcp: ["start", "reload", "stop", "status"],
+          skills: ["list", "reload"],
+          lsp: ["status", "stop"],
+        }
+        if (!allowed[service]?.includes(body.action)) {
+          return Response.json({ error: "bad action" }, { status: 400 })
+        }
+        return Response.json({
+          ok: true,
+          service,
+          action: body.action,
+          status: `${service} ${body.action} ok`,
+        })
+      }
 
       if (path === "/api/chat" && request.method === "POST") {
         const body = (await request.json()) as { session_id: string; message: string }
@@ -551,6 +581,40 @@ describe("OpenTUI client", () => {
     setup.mockInput.typeText("/agent steps 99")
     setup.mockInput.pressEnter()
     await setup.waitForFrame((text: string) => text.includes("must be 1..50"))
+  })
+
+  test("/mcp, /skills and /lsp report service status", async () => {
+    current = startMock()
+    const { setup } = await mount(current)
+    setupRef = setup
+
+    setup.mockInput.typeText("/mcp")
+    setup.mockInput.pressEnter()
+    await setup.waitForFrame((text: string) => text.includes("files: connected (2 tools)"))
+
+    setup.mockInput.typeText("/mcp reload")
+    setup.mockInput.pressEnter()
+    await setup.waitForFrame((text: string) => text.includes("mcp reload ok"))
+
+    setup.mockInput.typeText("/skills")
+    setup.mockInput.pressEnter()
+    await setup.waitForFrame((text: string) => text.includes("commit: write commits"))
+
+    setup.mockInput.typeText("/skills reload")
+    setup.mockInput.pressEnter()
+    await setup.waitForFrame((text: string) => text.includes("skills reload ok"))
+
+    setup.mockInput.typeText("/lsp")
+    setup.mockInput.pressEnter()
+    await setup.waitForFrame((text: string) => text.includes("pyright (running)"))
+
+    setup.mockInput.typeText("/lsp stop")
+    setup.mockInput.pressEnter()
+    await setup.waitForFrame((text: string) => text.includes("lsp stop ok"))
+
+    setup.mockInput.typeText("/mcp explode")
+    setup.mockInput.pressEnter()
+    await setup.waitForFrame((text: string) => text.includes("Usage: /mcp"))
   })
 
   test("Tab switches chat and agent mode", async () => {

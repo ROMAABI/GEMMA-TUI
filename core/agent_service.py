@@ -167,6 +167,78 @@ class AgentRuntime:
             except Exception:  # noqa: BLE001
                 pass
 
+    # ── service status (MCP / skills / LSP) ─────────────────────────────
+
+    def service_status(self, service: str) -> str:
+        """Sync status snapshot; safe to call from the HTTP thread."""
+        if service == "mcp":
+            if not getattr(self.settings, "mcp_enabled", True):
+                return "MCP is disabled in settings."
+            if self._mcp is None:
+                return "MCP is not started yet (it starts with the first agent run)."
+            return self._mcp.status()
+        if service == "skills":
+            if not getattr(self.settings, "skills_enabled", True):
+                return "Skills are disabled in settings."
+            if self._skills is None:
+                return "Skills are not loaded yet (they load with the first agent run)."
+            return self._skills.summary() or "No skills installed."
+        if service == "lsp":
+            if not getattr(self.settings, "lsp_enabled", True):
+                return "LSP is disabled in settings."
+            if self._lsp is None:
+                return "LSP is not started yet (it starts with the first agent run)."
+            return self._lsp.status()
+        return f"Unknown service {service}."
+
+    async def mcp_action(self, action: str) -> str:
+        """start|reload|stop, mirroring the classic TUI semantics."""
+        if not getattr(self.settings, "mcp_enabled", True):
+            return "MCP is disabled in settings."
+        if action == "stop":
+            if self._mcp is not None:
+                await self._mcp.stop()
+            self._mcp = None
+            self._mcp_started = False
+            self._registry = None
+            return "MCP stopped."
+        from core.mcp import MCPManager
+
+        if self._mcp is None or action == "reload":
+            if self._mcp is not None:
+                await self._mcp.stop()
+            self._mcp = MCPManager(
+                self.settings.workspace_dir,
+                getattr(self.settings, "mcp_config", ".gemma/mcp.json"),
+            )
+        if not self._mcp_started or action == "reload":
+            try:
+                await self._mcp.start()
+            except Exception as exc:  # noqa: BLE001 - report, don't crash the loop
+                self._mcp_started = True
+                return f"MCP start failed: {exc}"
+            self._mcp_started = True
+            self._registry = None
+        return self._mcp.status()
+
+    async def lsp_action(self, action: str) -> str:
+        """status|stop."""
+        if not getattr(self.settings, "lsp_enabled", True):
+            return "LSP is disabled in settings."
+        if action == "stop":
+            if self._lsp is not None:
+                await self._lsp.stop()
+            self._lsp = None
+            self._registry = None
+            return "LSP servers stopped."
+        return self.service_status("lsp")
+
+    async def skills_action(self, action: str) -> str:
+        """list (status snapshot) | reload."""
+        if action == "reload":
+            self.reload_integrations()
+        return self.service_status("skills")
+
     # ── permissions ─────────────────────────────────────────────────────
     async def _approve(self, request: PermissionRequest) -> str:
         run = _CURRENT_RUN.get()

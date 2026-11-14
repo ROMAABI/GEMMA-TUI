@@ -323,6 +323,12 @@ class _Handler(BaseHTTPRequestHandler):
             self._json({"pair": self.gemma.new_pairing_url()})
         elif path == "/api/permissions/config":
             self._permission_config()
+        elif path == "/api/mcp/status":
+            self._json({"enabled": self.gemma.settings.mcp_enabled, "status": self.gemma.agent.service_status("mcp")})
+        elif path == "/api/skills":
+            self._json({"enabled": self.gemma.settings.skills_enabled, "summary": self.gemma.agent.service_status("skills")})
+        elif path == "/api/lsp/status":
+            self._json({"enabled": self.gemma.settings.lsp_enabled, "status": self.gemma.agent.service_status("lsp")})
         elif path.startswith("/api/sessions/"):
             session_id = unquote(path.split("/", 3)[3]).split("/")[0]
             self._session_detail(session_id)
@@ -352,6 +358,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._set_context()
         elif path == "/api/agent/settings":
             self._agent_settings()
+        elif path in ("/api/mcp", "/api/skills", "/api/lsp"):
+            self._service_action(path.split("/")[-1])
         elif path == "/api/agent":
             self._agent()
         elif path == "/api/agent/abort":
@@ -672,6 +680,38 @@ class _Handler(BaseHTTPRequestHandler):
                 "max_steps": settings.agent_max_steps,
             }
         )
+
+    def _service_action(self, service: str) -> None:
+        try:
+            body = self._read_json()
+        except (ValueError, json.JSONDecodeError):
+            self._json({"error": "invalid json"}, 400)
+            return
+        action = str(body.get("action") or "status").strip().lower()
+        allowed = {
+            "mcp": ("start", "reload", "stop", "status"),
+            "skills": ("list", "reload"),
+            "lsp": ("status", "stop"),
+        }
+        if action not in allowed.get(service, ()):  # unknown service or action
+            self._json({"error": f"action must be one of {allowed.get(service, ())}"}, 400)
+            return
+        try:
+            if service == "mcp" and action == "status":
+                status = self.gemma.agent.service_status("mcp")
+            else:
+                future = self.gemma.agent._submit(
+                    self.gemma.agent.mcp_action(action)
+                    if service == "mcp"
+                    else self.gemma.agent.lsp_action(action)
+                    if service == "lsp"
+                    else self.gemma.agent.skills_action(action)
+                )
+                status = future.result(timeout=60)
+        except Exception as exc:  # noqa: BLE001 - report the failure to the client
+            self._json({"error": str(exc)}, 500)
+            return
+        self._json({"ok": True, "service": service, "action": action, "status": status})
 
     def _commands(self) -> list[dict[str, str]]:
         try:

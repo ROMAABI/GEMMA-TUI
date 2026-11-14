@@ -289,6 +289,29 @@ export class GemmaClient {
     return this.json("/api/agent/settings", { method: "POST", body: JSON.stringify(patch) })
   }
 
+  /** MCP manager status snapshot (may not be started before the first agent run). */
+  mcpStatus(): Promise<{ enabled: boolean; status: string }> {
+    return this.json("/api/mcp/status")
+  }
+
+  /** Skills list summary (empty string when no skills are installed). */
+  skillsSummary(): Promise<{ enabled: boolean; summary: string }> {
+    return this.json("/api/skills")
+  }
+
+  /** LSP manager status snapshot. */
+  lspStatus(): Promise<{ enabled: boolean; status: string }> {
+    return this.json("/api/lsp/status")
+  }
+
+  /** Drive MCP (start|reload|stop), skills (list|reload) or LSP (status|stop). */
+  serviceAction(
+    service: "mcp" | "skills" | "lsp",
+    action: string,
+  ): Promise<{ ok: boolean; service: string; action: string; status: string }> {
+    return this.json(`/api/${service}`, { method: "POST", body: JSON.stringify({ action }) })
+  }
+
   abortRun(runId: string): Promise<unknown> {
     return this.json("/api/agent/abort", { method: "POST", body: JSON.stringify({ run_id: runId }) })
   }

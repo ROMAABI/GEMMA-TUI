@@ -423,3 +423,24 @@ def test_agent_settings_endpoints(web, tmp_path: Path) -> None:
         info = client.get("/api/info").json()
         assert info["max_steps"] == 3
         assert info["workspace"] == str(tmp_path)
+
+
+def test_service_status_and_actions(web) -> None:
+    server, base, _store = web
+    with _paired_client(base, server) as client:
+        status = client.get("/api/mcp/status")
+        assert status.status_code == 200
+        assert "MCP" in status.json()["status"]
+
+        skills = client.get("/api/skills")
+        assert skills.status_code == 200
+        assert isinstance(skills.json()["summary"], str)
+
+        lsp = client.get("/api/lsp/status")
+        assert lsp.status_code == 200
+        assert "LSP" in lsp.json()["status"]
+
+        # Unknown actions are rejected before touching the runtime loop.
+        assert client.post("/api/mcp", json={"action": "explode"}).status_code == 400
+        assert client.post("/api/lsp", json={"action": "stop"}).status_code == 200
+        assert client.post("/api/skills", json={"action": "reload"}).status_code == 200

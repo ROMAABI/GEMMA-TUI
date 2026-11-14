@@ -430,6 +430,22 @@ export function createChat(client: GemmaClient) {
     }
   }
 
+  /** Status snapshot or action result for MCP / skills / LSP. */
+  async function serviceStatus(service: "mcp" | "skills" | "lsp", action: string): Promise<string | null> {
+    try {
+      if (action === "status" || (service === "skills" && action === "list")) {
+        if (service === "mcp") return (await client.mcpStatus()).status
+        if (service === "lsp") return (await client.lspStatus()).status
+        return (await client.skillsSummary()).summary
+      }
+      const result = await client.serviceAction(service, action)
+      return result.status
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error))
+      return null
+    }
+  }
+
   async function refreshTitles(): Promise<void> {
     try {
       const metas = await client.sessions()
@@ -844,6 +860,7 @@ export function createChat(client: GemmaClient) {
     updatePermissions,
     permissionConfig,
     setAgentSettings,
+    serviceStatus,
     send,
     stop,
     respondPermission,
