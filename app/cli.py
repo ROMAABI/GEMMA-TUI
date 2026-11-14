@@ -1,6 +1,10 @@
 import atexit
+import os
+import shutil
 import subprocess
 import time
+import webbrowser
+from pathlib import Path
 
 import typer
 from rich.console import Console
@@ -33,11 +37,76 @@ def _ensure_server(base_url: str) -> bool:
     return False
 
 
+TUI_DIR = Path(__file__).resolve().parent.parent / "tui-ts"
+
+
+def _find_bun() -> str | None:
+    """Locate the Bun runtime used by the OpenTUI client."""
+    found = shutil.which("bun")
+    if found:
+        return found
+    fallback = Path.home() / ".bun" / "bin" / "bun"
+    return str(fallback) if fallback.exists() else None
+
+
+def _opentui_ready(bun: str | None) -> bool:
+    return bool(bun) and (TUI_DIR / "src" / "index.tsx").exists() and (TUI_DIR / "node_modules").exists()
+
+
+def _run_opentui(settings: Settings, session_id: str | None = None) -> bool:
+    """Start the shared server and hand the terminal to the OpenTUI client.
+
+    Returns False when the client cannot run, so the caller can fall back to the
+    Textual TUI instead of leaving the user with no interface.
+    """
+    bun = _find_bun()
+    if not _opentui_ready(bun):
+        if bun is None:
+            console.print("[yellow]Bun was not found, so the OpenTUI client cannot start.[/yellow]")
+        else:
+            console.print(
+                "[yellow]The OpenTUI client is not installed. Run "
+                "[/yellow][cyan]cd tui-ts && bun install[/cyan][yellow].[/yellow]"
+            )
+        return False
+
+    from core.webui import GemmaWebServer
+
+    server = GemmaWebServer(settings)
+    base = server.start()
+    pair = server.new_pairing_url()
+
+    env = os.environ.copy()
+    env["GEMMA_URL"] = base
+    env["GEMMA_PAIR_URL"] = pair
+    if session_id:
+        env["GEMMA_SESSION_ID"] = session_id
+
+    started = time.monotonic()
+    try:
+        completed = subprocess.run([bun, "run", "src/index.tsx"], cwd=TUI_DIR, env=env)
+    except KeyboardInterrupt:
+        completed = None
+    finally:
+        server.stop()
+
+    if completed is None:
+        return True
+    # A crash before the first frame means the client is unusable here; let the
+    # caller fall back to the classic TUI.
+    return completed.returncode == 0 or (time.monotonic() - started) > 2.0
+
+
 @app.callback(invoke_without_command=True)
 def main(
     ctx: typer.Context,
     session: str | None = typer.Option(None, "--session", "-s", help="Open an existing session id."),
     model: str | None = typer.Option(None, "--model", "-m", help="Use a model alias."),
+    classic: bool = typer.Option(
+        False,
+        "--classic",
+        help="Use the Textual TUI (agent mode, permissions and MCP) instead of OpenTUI.",
+    ),
 ) -> None:
     if ctx.invoked_subcommand:
         return
@@ -46,10 +115,19 @@ def main(
     if model:
         settings.model = model
 
+    was_running = server_is_healthy(settings.base_url)
     if not _ensure_server(settings.base_url):
         console.print("[yellow]Warning: llama.cpp server is not running. [/yellow]")
+    elif not was_running:
+        # Only stop what this process started; a pre-existing llama.cpp server
+        # (or one owned by another tool) stays up after the TUI exits.
+        atexit.register(stop_llama_server)
 
-    atexit.register(stop_llama_server)
+    if not classic and _run_opentui(settings, session):
+        return
+    if not classic:
+        console.print("[dim]Falling back to the classic TUI (gemma --classic).[/dim]")
+
     GemmaTUI(settings=settings, initial_session_id=session).run()
 
 
@@ -64,6 +142,37 @@ def sessions() -> None:
 
     for row in rows:
         console.print(f"{row.id}  {row.title}  {row.updated_at}")
+
+
+@app.command()
+def web(
+    port: int = typer.Option(47317, "--port", "-p", help="Port for the web UI server."),
+    host: str = typer.Option("127.0.0.1", "--host", help="Interface to bind."),
+    open_browser: bool = typer.Option(
+        True, "--open/--no-open", help="Open the pairing link in a browser."
+    ),
+) -> None:
+    """Serve the web UI and print a one-time pairing link."""
+    settings = Settings.load()
+    if not _ensure_server(settings.base_url):
+        console.print("[yellow]Warning: llama.cpp server is not running. [/yellow]")
+
+    from core.webui import GemmaWebServer
+
+    server = GemmaWebServer(settings, host=host, port=port)
+    url = server.start()
+    pair = server.new_pairing_url()
+    console.print(f"[bold green]Gemma web UI[/bold green] serving at [cyan]{url}[/cyan]")
+    console.print(f"Pair: [cyan]{pair}[/cyan]")
+    console.print("[dim]Links work once and expire in 5 minutes. Ctrl+C to stop.[/dim]")
+    if open_browser:
+        webbrowser.open(pair)
+    try:
+        server.wait()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.stop()
 
 
 @app.command()

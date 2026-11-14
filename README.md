@@ -67,6 +67,7 @@ Switch anytime: `/theme cyberpunk`
 - **🔍 Web Search RAG** — local SearXNG → public SearXNG fallback → Wikipedia + DuckDuckGo → Jina Reader deep-read → cited answer
 - **🎨 7 themes** — `tokyo-night` (default), `dracula`, `deep-purple`, `nord`, `cyberpunk`, `emerald`, `system` (transparent)
 - **🧠 Model registry** — auto-discovers `models/*.gguf`, auto-detects loaded model from `/v1/models`, switch live
+- **🌐 Web UI** — the same server serves a browser app: `/web` or `Ctrl+W` prints a one-time pairing link; chats are shared with the TUI
 - **📁 Sessions** — SQLite, auto-titles, search, rename/delete, resume via `--session`
 - **⌨️ Power UX** — `/` autocomplete, `Ctrl+P` palette, `Ctrl+B` sidebar, `Ctrl+N/L/Y/C/D`
 
@@ -178,24 +179,53 @@ Script does: detect `docker`/`podman` → generate `searxng/settings.yml` (secre
 ### Launch
 
 ```bash
-gemma-local                  # TUI
+gemma-local                  # OpenTUI client (default)
+gemma-local --classic        # Textual TUI (alternative front end)
 python main.py               # same, without install
 gemma-local -s <session_id>  # resume session
 gemma-local -m <model_name>  # start with specific model
 ```
 
+`gemma-local` starts the shared server (`core/webui.py`) and hands the terminal
+to the OpenTUI client in `tui-ts/` (Bun + Solid). The client pairs with the server
+using a one-time link, then talks to the same `/api` routes the web UI uses, so
+terminal and browser share sessions. If Bun or `tui-ts/node_modules` is missing,
+it prints how to install it and falls back to the Textual TUI. Both clients
+share the same agent runtime: the server exposes `/api/agent` (SSE), tool
+permissions and the provider catalog, so the OpenTUI client has agent mode,
+tool calls and approval prompts too. `--classic` keeps the Textual TUI as an
+alternative front end.
+
+### Web UI (paired, OpenCode-style)
+
+```bash
+gemma-local                 # then type /web (or press Ctrl+W)
+gemma-local web             # standalone: prints "Pair: http://127.0.0.1:47317/pair?token=…"
+```
+
+The TUI starts a local server that serves the React app from `web/dist` and the
+`/api` routes from `core/webui.py`; `/web` (or `Ctrl+W`) mints a one-time
+pairing link: the classic TUI opens it in your browser, the OpenTUI client shows
+it above the chat (click it to copy). Links work once and expire after five minutes;
+opening one sets an `HttpOnly` session cookie (30 days) and redirects to the app. The browser and the terminal
+share one SQLite session store, so chats started in either show up in both. The
+web UI is chat-only (Agent mode stays in the TUI), locks the model to the one the
+server has loaded, and stops when the TUI exits.
+
 ### CLI reference
 
 | Command | What it does |
 |---|---|
-| `gemma-local` | Open TUI (auto-starts `systemd --user gemma-llama-server` if present, warns otherwise) |
+| `gemma-local` | Open the OpenTUI client (auto-starts `systemd --user gemma-llama-server` if present, warns otherwise) |
+| `gemma-local --classic` | Open the Textual TUI instead of the OpenTUI client |
 | `gemma-local models` | Table of discovered `models/*.gguf` + which is active |
 | `gemma-local model [name]` | No arg = list; with arg = switch active model |
 | `gemma-local switch <name>` | Switch active model alias |
+| `gemma-local web` | Serve the web UI and print a one-time pairing link (`--port`, `--host`, `--open/--no-open`) |
 | `gemma-local sessions` | List saved sessions (`id  title  updated_at`) |
 | `gemma-local config` | Print resolved config as JSON |
 
-Flags: `--session/-s <id>`, `--model/-m <name>`.
+Flags: `--session/-s <id>`, `--model/-m <name>`, `--classic`.
 
 ### In-app slash commands
 
@@ -204,8 +234,9 @@ Flags: `--session/-s <id>`, `--model/-m <name>`.
 | `/help` | cheatsheet |
 | `/mode [chat\|agent]` | `/mode agent` — force coding agent |
 | `/agent [on\|off\|status\|dir <path>]` | `/agent dir ~/projects/myapp` — set sandbox |
+| `/web` | open the web UI in a browser (pairing link, shared sessions) |
 | `/websearch [on\|off\|status\|test <q>\|url <url>]` | `/websearch test latest textual release` |
-| `/theme [name]` | `/theme nord` |
+| `/theme [name]` | `/theme nord` (classic) · `/theme violet`, `/theme dark` (OpenTUI) |
 | `/model [name]` | `/model gemma-3-4b-it` |
 | `/sidebar [show\|hide\|toggle]` | sidebar nav |
 | `/copy` | copy last reply |
@@ -215,7 +246,60 @@ Flags: `--session/-s <id>`, `--model/-m <name>`.
 
 Type `/` for autocomplete, or `Ctrl+P` for palette.
 
-### Keyboard shortcuts
+### OpenTUI keyboard shortcuts
+
+| Key | Action |
+|---|---|
+| `Enter` | Send |
+| `Shift+Enter` | Newline |
+| `Tab` | Switch chat / agent mode (completes commands while the palette is open) |
+| `Ctrl+X` then `n` | New session |
+| `Ctrl+X` then `l` | Toggle the session rail |
+| `Ctrl+X` then `m` | Model picker |
+| `Ctrl+X` then `t` | Theme picker |
+| `Ctrl+X` then `a` | Switch chat / agent mode |
+| `Ctrl+X` then `b` | Toggle sidebar |
+| `Ctrl+X` then `h` | Commands & keys |
+| `Ctrl+X` then `q` | Quit |
+| `Ctrl+P` | Command palette (`/`) |
+| `Ctrl+B` | Toggle sidebar |
+| `Ctrl+N` | New session |
+| `Ctrl+L` | Clear session |
+| `Ctrl+T` | Theme picker |
+| `Ctrl+K` | Pick a provider model |
+| `Ctrl+Y` | Copy last reply (OSC 52) |
+| `Ctrl+W` | Pair a browser |
+| `Ctrl+C` | Stop streaming |
+| `Ctrl+D` / `Ctrl+Q` | Quit |
+| `F1` | Commands & keys |
+
+The OpenTUI client has its own theme model (`/theme`): names `opencode`,
+`violet`, `cyan`, `emerald`, `system`, plus `mode` `system` (follow the
+terminal's light/dark appearance), `dark` or `light`. The `system` theme reads
+the terminal palette over OSC and repaints when the terminal changes; choices
+are saved in `~/.config/gemma-local/tui-ts.json`. The classic Textual themes
+above are unchanged.
+
+### Providers
+
+The local llama.cpp server is the default provider and the first entry in the
+model picker. Extra OpenAI-compatible endpoints (Ollama, LM Studio, a second
+llama.cpp instance) are listed from a JSON array:
+
+```bash
+export GEMMA_PROVIDERS='[
+  {"id":"ollama","name":"Ollama","base_url":"http://127.0.0.1:11434",
+   "models":["qwen2.5-coder:7b"]}
+]'
+gemma
+```
+
+`GET /api/providers` returns the catalog (`default`, `active`, `providers[]`
+with `is_default`); `POST /api/models {"provider":"ollama","name":"…"}` points
+the client at that endpoint and saves `base_url` + `model`. The picker groups
+models by provider; `Ctrl+K` or `/model` opens it.
+
+### Textual keyboard shortcuts (`--classic`)
 
 | Key | Action |
 |---|---|
@@ -226,6 +310,7 @@ Type `/` for autocomplete, or `Ctrl+P` for palette.
 | `Ctrl+N` | New chat |
 | `Ctrl+L` | Clear view |
 | `Ctrl+Y` | Copy last reply |
+| `Ctrl+W` | Open the web UI |
 | `Ctrl+C` | Cancel streaming / agent step |
 | `Ctrl+D` | Quit |
 | `Delete` | Delete session |
@@ -293,7 +378,7 @@ Resolved order: `defaults` → config file → env vars → live server auto-det
 base_url = "http://127.0.0.1:8080"
 
 [model]
-name = "gemma-4-E4B-it-Q4_K_M"
+name = "gemma-4-E4B-it-ultra-uncensored-heretic-Q4_K_M"
 temperature = 0.7
 
 [ui]

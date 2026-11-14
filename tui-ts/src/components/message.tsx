@@ -1,0 +1,192 @@
+import { For, Match, Show, Switch, createMemo } from "solid-js"
+import type { ColorInput } from "@opentui/core"
+import type { Message, Part } from "../chat"
+import { colors } from "../theme"
+import { clockTime, formatNumber, formatSeconds } from "../format"
+import { MarkdownView, PlainView } from "./markdown"
+
+function summarizeArgs(args: Record<string, unknown>): string {
+  const preferred = ["command", "path", "file_path", "pattern", "query", "url", "name", "prompt"]
+  for (const key of preferred) {
+    const value = args[key]
+    if (typeof value === "string" && value.trim()) {
+      const clean = value.replace(/\s+/g, " ").trim()
+      return clean.length > 56 ? `${clean.slice(0, 55)}…` : clean
+    }
+  }
+  const first = Object.values(args).find((value) => typeof value === "string")
+  return typeof first === "string" ? first.slice(0, 56) : ""
+}
+
+function ToolBlock(props: { part: Extract<Part, { kind: "tool" }>; accent: ColorInput }) {
+  const icon = () =>
+    props.part.status === "running" ? "▸" : props.part.status === "error" ? "✗" : "✓"
+  const color = () =>
+    props.part.status === "running"
+      ? colors().warning
+      : props.part.status === "error"
+        ? colors().danger
+        : colors().success
+  const duration = () =>
+    props.part.finishedAt && props.part.startedAt
+      ? formatSeconds((props.part.finishedAt - props.part.startedAt) / 1000)
+      : ""
+  const preview = createMemo(() => {
+    const text = (props.part.result ?? "").trim()
+    if (!text) return ""
+    const lines = text.split("\n").slice(0, 4)
+    return lines.join("\n")
+  })
+
+  return (
+    <box flexDirection="column" flexShrink={0} marginTop={1}>
+      <box flexDirection="row" height={1} gap={1}>
+        <text style={{ fg: color() }}>{icon()}</text>
+        <text style={{ fg: colors().text }}>
+          <b>{props.part.name}</b>
+        </text>
+        <text style={{ fg: colors().faint }} truncate>
+          {summarizeArgs(props.part.args)}
+        </text>
+        <Show when={duration()}>
+          <text style={{ fg: colors().faint }}>{duration()}</text>
+        </Show>
+      </box>
+      <Show when={preview()}>
+        <box border={["left"]} borderColor={colors().border} paddingLeft={1} marginLeft={1}>
+          <text style={{ fg: props.part.status === "error" ? colors().danger : colors().muted }} wrapMode="word">
+            {preview()}
+          </text>
+        </box>
+      </Show>
+    </box>
+  )
+}
+
+function ReasoningBlock(props: { text: string }) {
+  const preview = createMemo(() => {
+    const lines = props.text.trim().split("\n")
+    return lines.length > 6 ? `${lines.slice(0, 6).join("\n")}…` : lines.join("\n")
+  })
+  return (
+    <box flexDirection="column" flexShrink={0} marginTop={1} border={["left"]} borderColor={colors().border} paddingLeft={1}>
+      <text style={{ fg: colors().faint }} height={1}>
+        <i>thinking</i>
+      </text>
+      <text style={{ fg: colors().muted }} wrapMode="word">
+        <i>{preview()}</i>
+      </text>
+    </box>
+  )
+}
+
+/** One transcript entry, OpenCode style: user blocks are tinted, replies are plain. */
+export function MessageCard(props: {
+  message: Message
+  accent: ColorInput
+  model: string
+  streaming: boolean
+  onCopy: (text: string) => void
+}) {
+  const isUser = () => props.message.role === "user"
+
+  return (
+    <box flexDirection="column" width="100%" flexShrink={0} marginBottom={1}>
+      <Show
+        when={isUser()}
+        fallback={
+          <box flexDirection="column" width="100%" paddingLeft={1} paddingRight={1}>
+            <box flexDirection="row" height={1} gap={1}>
+              <text style={{ fg: props.accent }}>
+                <b>gemma</b>
+              </text>
+              <text style={{ fg: colors().faint }}>{truncateModel(props.model)}</text>
+              <text style={{ fg: colors().faint }}>{clockTime(props.message.createdAt)}</text>
+              <Show when={props.streaming}>
+                <text style={{ fg: colors().warning }}>● working</text>
+              </Show>
+              <Show when={props.message.stopped}>
+                <text style={{ fg: colors().warning }}>stopped</text>
+              </Show>
+            </box>
+
+            <For each={props.message.parts}>
+              {(part) => (
+                <Switch>
+                  <Match when={part.kind === "tool"}>
+                    <ToolBlock part={part as Extract<Part, { kind: "tool" }>} accent={props.accent} />
+                  </Match>
+                  <Match when={part.kind === "reasoning"}>
+                    <ReasoningBlock text={part.kind === "reasoning" ? part.text : ""} />
+                  </Match>
+                  <Match when={part.kind === "text"}>
+                    <box flexDirection="column" marginTop={1}>
+                      <MarkdownView
+                        content={part.kind === "text" ? part.text : ""}
+                        accent={props.accent}
+                        onCopy={props.onCopy}
+                      />
+                    </box>
+                  </Match>
+                </Switch>
+              )}
+            </For>
+
+            <Show when={props.message.error}>
+              <text style={{ fg: colors().danger }} marginTop={1}>
+                {props.message.error}
+              </text>
+            </Show>
+
+            <Show when={!props.message.parts.length && props.streaming}>
+              <text style={{ fg: colors().faint }} marginTop={1}>
+                …
+              </text>
+            </Show>
+
+            <box flexDirection="row" height={1} gap={1} marginTop={1}>
+              <Show when={typeof props.message.elapsed === "number" && !props.streaming}>
+                <text style={{ fg: colors().faint }}>
+                  {`⚡ ${formatSeconds(props.message.elapsed ?? 0)}`}
+                  {` · ${formatNumber(
+                    Math.round(
+                      (props.message.content.length / 4) /
+                        Math.max((props.message.elapsed ?? 0) - (props.message.ttft ?? 0), 0.001),
+                    ),
+                  )} tok/s`}
+                </text>
+              </Show>
+              <box flexGrow={1} />
+              <text style={{ fg: colors().faint }} onMouseDown={() => props.onCopy(props.message.content)}>
+                ❐ copy
+              </text>
+            </box>
+          </box>
+        }
+      >
+        <box
+          flexDirection="column"
+          width="100%"
+          backgroundColor={colors().card}
+          border={["left"]}
+          borderColor={props.accent}
+          paddingLeft={1}
+          paddingRight={1}
+        >
+          <box flexDirection="row" height={1} gap={1}>
+            <text style={{ fg: props.accent }}>
+              <b>you</b>
+            </text>
+            <text style={{ fg: colors().faint }}>{clockTime(props.message.createdAt)}</text>
+          </box>
+          <PlainView content={props.message.content} />
+        </box>
+      </Show>
+    </box>
+  )
+}
+
+function truncateModel(model: string): string {
+  if (!model) return ""
+  return model.length > 28 ? `${model.slice(0, 27)}…` : model
+}

@@ -59,12 +59,43 @@ class LlamaClient:
             data = response.json()
         return _clean_output(data.get("content", "")).strip()
 
-    async def stream_chat(self, messages: list[dict[str, str]]) -> AsyncIterator[str]:
+    async def warmup(self, messages: list[dict[str, str]]) -> bool:
+        """Prime the server prompt cache without generating a real answer.
+
+        The first request of a session pays for processing the whole system
+        prompt and tool catalog. Sending the same prefix once with
+        ``n_predict=1`` makes every later request reuse it.
+        """
+        payload = {
+            "prompt": _build_prompt(messages),
+            "n_predict": 1,
+            "temperature": 0.0,
+            "stream": False,
+            "cache_prompt": True,
+            "stop": ["<end_of_turn>"],
+        }
+        timeout = httpx.Timeout(connect=10.0, read=900.0, write=30.0, pool=10.0)
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.post(
+                    f"{self.settings.base_url}/completion", json=payload
+                )
+                return response.status_code < 400
+        except Exception:  # noqa: BLE001 - warmup is best effort
+            return False
+
+    async def stream_chat(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float | None = None,
+        n_predict: int = 2048,
+    ) -> AsyncIterator[str]:
         prompt = _build_prompt(messages)
         payload = {
             "prompt": prompt,
-            "n_predict": 2048,
-            "temperature": self.settings.temperature,
+            "n_predict": n_predict,
+            "temperature": self.settings.temperature if temperature is None else temperature,
             "stream": True,
             "cache_prompt": True,
             "stop": ["<end_of_turn>"],

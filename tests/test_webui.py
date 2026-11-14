@@ -1,0 +1,373 @@
+from __future__ import annotations
+
+import json
+from contextlib import contextmanager
+from pathlib import Path
+
+import httpx
+import pytest
+
+import core.webui as webui
+from config.settings import Settings
+from sessions.store import SessionStore
+
+
+class FakeClient:
+    """Streams a fixed reply without touching llama.cpp."""
+
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+
+    async def stream_chat(self, messages, **kwargs):  # type: ignore[no-untyped-def]
+        for token in ("Hel", "lo ", "there"):
+            yield token
+
+
+@pytest.fixture()
+def web(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(webui, "LlamaClient", FakeClient)
+    # Keep the developer's real config file untouched by the tests.
+    monkeypatch.setattr(Settings, "save_config", lambda self: None)
+    store = SessionStore(tmp_path / "sessions.sqlite3")
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("<!doctype html><title>gemma</title>", encoding="utf-8")
+    assets = dist / "assets"
+    assets.mkdir()
+    (assets / "app.js").write_text("console.log('gemma')", encoding="utf-8")
+
+    server = webui.GemmaWebServer(Settings(), port=0, store=store, dist=dist)
+    base = server.start()
+    try:
+        yield server, base, store
+    finally:
+        server.stop()
+
+
+@contextmanager
+def _paired_client(base: str, server: webui.GemmaWebServer):
+    with httpx.Client(base_url=base, follow_redirects=False, timeout=10) as client:
+        response = client.get(server.new_pairing_url())
+        assert response.status_code == 302
+        assert response.headers["location"] == "/"
+        yield client
+
+
+def test_pairing_is_required_and_single_use(web) -> None:
+    server, base, _store = web
+    with httpx.Client(base_url=base, follow_redirects=False, timeout=10) as client:
+        page = client.get("/")
+        assert page.status_code == 403
+        assert "Pair this browser" in page.text
+
+        api = client.get("/api/info")
+        assert api.status_code == 401
+
+        pair_url = server.new_pairing_url()
+        first = client.get(pair_url)
+        assert first.status_code == 302
+        assert "gemma_web=" in first.headers["set-cookie"]
+        assert "HttpOnly" in first.headers["set-cookie"]
+
+        # The cookie now opens the UI and the API.
+        assert client.get("/").status_code == 200
+        info = client.get("/api/info").json()
+        assert info["app"] == "gemma"
+        assert info["model"] == Settings().model
+
+        # Pairing links work once.
+        assert client.get(pair_url).status_code == 403
+
+
+def test_session_crud_api(web) -> None:
+    server, base, store = web
+    with _paired_client(base, server) as client:
+        created = client.post("/api/sessions")
+        assert created.status_code == 201
+        session_id = created.json()["id"]
+
+        store.add_message(session_id, "user", "hello from the tui")
+        sessions = client.get("/api/sessions").json()["sessions"]
+        row = next(item for item in sessions if item["id"] == session_id)
+        assert row["title"] == "hello from the tui"
+        assert row["message_count"] == 1
+        assert row["updated_at"].endswith("Z")
+
+        detail = client.get(f"/api/sessions/{session_id}").json()
+        assert detail["messages"][0]["role"] == "user"
+        assert detail["messages"][0]["content"] == "hello from the tui"
+
+        renamed = client.patch(f"/api/sessions/{session_id}", json={"title": "Renamed"})
+        assert renamed.status_code == 200
+        assert client.get(f"/api/sessions/{session_id}").json()["title"] == "Renamed"
+
+        cleared = client.post(f"/api/sessions/{session_id}/clear")
+        assert cleared.status_code == 200
+        assert client.get(f"/api/sessions/{session_id}").json()["messages"] == []
+
+        deleted = client.delete(f"/api/sessions/{session_id}")
+        assert deleted.status_code == 200
+        assert client.get(f"/api/sessions/{session_id}").status_code == 404
+
+
+def test_chat_streams_and_persists(web) -> None:
+    server, base, store = web
+    with _paired_client(base, server) as client:
+        session_id = client.post("/api/sessions").json()["id"]
+        events: list[dict] = []
+        with client.stream(
+            "POST",
+            "/api/chat",
+            json={"session_id": session_id, "message": "say hello"},
+        ) as response:
+            assert response.status_code == 200
+            assert response.headers["content-type"].startswith("text/event-stream")
+            for line in response.iter_lines():
+                if not line.startswith("data: "):
+                    continue
+                payload = line[6:]
+                if payload == "[DONE]":
+                    break
+                events.append(json.loads(payload))
+
+        assert events[0]["type"] == "start"
+        assert events[0]["session_id"] == session_id
+        assert "".join(e["content"] for e in events if e["type"] == "token") == "Hello there"
+        done = next(e for e in events if e["type"] == "done")
+        assert done["tokens"] == 3
+        assert done["elapsed"] >= 0
+
+        messages = store.messages(session_id)
+        assert [m["role"] for m in messages] == ["user", "assistant"]
+        assert messages[1]["content"] == "Hello there"
+
+
+def test_static_assets_and_spa_fallback(web) -> None:
+    server, base, _store = web
+    with _paired_client(base, server) as client:
+        index = client.get("/")
+        assert index.status_code == 200
+        assert "gemma" in index.text
+
+        asset = client.get("/assets/app.js")
+        assert asset.status_code == 200
+        assert "javascript" in asset.headers["content-type"]
+        assert "immutable" in asset.headers["cache-control"]
+
+        spa = client.get("/chats/abc123")
+        assert spa.status_code == 200
+        assert "gemma" in spa.text
+
+        missing = client.get("/assets/missing.js")
+        assert missing.status_code == 404
+
+
+def test_missing_build_explains_how_to_build(tmp_path: Path) -> None:
+    server = webui.GemmaWebServer(
+        Settings(),
+        port=0,
+        store=SessionStore(tmp_path / "sessions.sqlite3"),
+        dist=tmp_path / "does-not-exist",
+    )
+    base = server.start()
+    try:
+        with _paired_client(base, server) as client:
+            page = client.get("/")
+            assert page.status_code == 503
+            assert "npm run build" in page.text
+    finally:
+        server.stop()
+
+
+def test_models_and_commands_api(web) -> None:
+    server, base, _store = web
+    with _paired_client(base, server) as client:
+        payload = client.get("/api/models").json()
+        assert payload["active"] == server.settings.model
+        names = [item["name"] for item in payload["models"]]
+        assert server.settings.model in names
+        assert payload["models"][0]["active"] is True
+
+        switched = client.post("/api/models", json={"name": "test-model"})
+        assert switched.status_code == 200
+        assert switched.json()["active"] == "test-model"
+        assert server.settings.model == "test-model"
+        assert client.get("/api/info").json()["model"] == "test-model"
+
+        assert client.post("/api/models", json={"name": ""}).status_code == 400
+
+        commands = client.get("/api/commands").json()["commands"]
+        assert any(item["name"] == "/new" for item in commands)
+        assert all(item["name"].startswith("/") for item in commands)
+
+
+def test_pair_endpoint_accepts_get_and_post(web) -> None:
+    server, base, _store = web
+    with _paired_client(base, server) as client:
+        via_get = client.get("/api/pair").json()["pair"]
+        via_post = client.post("/api/pair").json()["pair"]
+        assert via_get.startswith(base)
+        assert via_post.startswith(base)
+        assert via_get != via_post
+
+        with httpx.Client(base_url=base, follow_redirects=False, timeout=10) as anon:
+            assert anon.get(via_get).status_code == 403  # superseded by the newer link
+            assert anon.get(via_post).status_code == 302
+
+
+def test_pair_endpoint_mints_a_fresh_link(web) -> None:
+    server, base, _store = web
+    with _paired_client(base, server) as client:
+        first = client.get("/api/pair").json()["pair"]
+        second = client.get("/api/pair").json()["pair"]
+        assert first.startswith(base)
+        assert "/pair?token=" in first
+        assert first != second
+
+        with httpx.Client(base_url=base, follow_redirects=False, timeout=10) as anon:
+            assert anon.get(first).status_code == 403  # superseded by the newer link
+            assert anon.get(second).status_code == 302
+
+
+class FakeOrchestrator:
+    """Asks for permission once, then reports the answer as text."""
+
+    def __init__(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
+        self.kwargs = kwargs
+
+    async def run(self, messages):  # type: ignore[no-untyped-def]
+        from core.agent import AgentEvent
+        from core.permissions import PermissionRequest
+
+        yield AgentEvent("step_start", {"step": 1, "max_steps": 1})
+        approval = self.kwargs["approval"]
+        decision = await approval(
+            PermissionRequest(
+                action="write",
+                resources=["notes.txt"],
+                tool="write_file",
+                args={"path": "notes.txt"},
+                reason="test approval",
+            )
+        )
+        yield AgentEvent("text", f"decision={decision}")
+        yield AgentEvent("complete", f"decision={decision}")
+
+
+def test_provider_catalog_lists_local_first(web) -> None:
+    server, base, _store = web
+    from core.provider_catalog import catalog
+
+    payload = catalog(server.settings)
+    assert payload["default"] == "llama.cpp"
+    assert payload["providers"][0]["id"] == "llama.cpp"
+    assert payload["providers"][0]["is_default"] is True
+    assert payload["active"]["provider"] == "llama.cpp"
+    assert payload["providers"][0]["models"][0]["name"] == server.settings.model
+
+    with _paired_client(base, server) as client:
+        api = client.get("/api/providers").json()
+        assert api["providers"][0]["id"] == "llama.cpp"
+        assert client.get("/api/info").json()["provider"] == "llama.cpp"
+
+
+def test_switch_provider_and_model(web) -> None:
+    server, base, _store = web
+    with _paired_client(base, server) as client:
+        names = [
+            model["name"]
+            for model in client.get("/api/providers").json()["providers"][0]["models"]
+        ]
+        targets = [name for name in names if name != server.settings.model]
+        if not targets:
+            pytest.skip("only one local model is available")
+        target = targets[0]
+        switched = client.post(
+            "/api/models",
+            json={"provider": "llama.cpp", "name": target},
+        )
+        assert switched.status_code == 200
+        assert server.settings.model == target
+        assert switched.json()["provider"]["model"] == target
+
+        assert (
+            client.post(
+                "/api/models", json={"provider": "llama.cpp", "name": "missing"}
+            ).status_code
+            == 400
+        )
+
+        unknown = client.post(
+            "/api/models",
+            json={"provider": "nope", "name": "x"},
+        )
+        assert unknown.status_code == 400
+
+
+def test_mode_switch_api(web) -> None:
+    server, base, _store = web
+    with _paired_client(base, server) as client:
+        chat = client.post("/api/mode", json={"mode": "chat"})
+        assert chat.status_code == 200
+        assert server.settings.agent_mode is False
+        assert client.get("/api/info").json()["mode"] == "chat"
+
+        agent = client.post("/api/mode", json={"mode": "agent"})
+        assert agent.status_code == 200
+        assert server.settings.agent_mode is True
+
+        assert client.post("/api/mode", json={"mode": "nope"}).status_code == 400
+
+
+def test_agent_stream_round_trips_permission(web, monkeypatch: pytest.MonkeyPatch) -> None:
+    server, base, _store = web
+    import core.agent_service as agent_service
+
+    monkeypatch.setattr(agent_service, "AgentOrchestrator", FakeOrchestrator)
+
+    with _paired_client(base, server) as client:
+        session_id = client.post("/api/sessions").json()["id"]
+        events: list[dict] = []
+        with client.stream(
+            "POST",
+            "/api/agent",
+            json={"session_id": session_id, "message": "write a file"},
+        ) as response:
+            assert response.status_code == 200
+            assert response.headers["content-type"].startswith("text/event-stream")
+            for line in response.iter_lines():
+                if not line.startswith("data: "):
+                    continue
+                payload = line[6:]
+                if payload == "[DONE]":
+                    break
+                event = json.loads(payload)
+                events.append(event)
+                if event["type"] == "permission_request":
+                    resolved = client.post(
+                        f"/api/permissions/{event['id']}",
+                        json={"decision": "allow"},
+                    )
+                    assert resolved.status_code == 200
+
+        types = [event["type"] for event in events]
+        assert types[0] == "start"
+        assert "run" in types
+        assert "permission_request" in types
+        assert any(
+            event["type"] == "text" and event["content"] == "decision=allow"
+            for event in events
+        )
+        assert "complete" in types
+
+        # The user turn is persisted even though the fake stops early.
+        assert server.store.messages(session_id)[0]["content"] == "write a file"
+
+
+def test_unknown_permission_and_abort(web) -> None:
+    server, base, _store = web
+    with _paired_client(base, server) as client:
+        missing = client.post("/api/permissions/nope", json={"decision": "allow"})
+        assert missing.status_code == 404
+        aborted = client.post("/api/agent/abort", json={"run_id": "nope"})
+        assert aborted.json()["ok"] is False

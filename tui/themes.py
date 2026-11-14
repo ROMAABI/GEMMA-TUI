@@ -209,10 +209,36 @@ THEMES: dict[str, Theme] = {
         assistant_name="#10B981",
         bg_new_btn="#0B2720",
         syntax_theme="monokai",
+    ),    "opencode": Theme(
+        id="opencode",
+        name="OpenCode (Dark)",
+        bg_app="#121212",
+        bg_sidebar="#121212",
+        bg_card="#1a1a1a",
+        bg_user_card="#1a1a1a",
+        bg_code="#161616",
+        border="#2a2a2a",
+        border_accent="#22d3ee",
+        accent_primary="#22d3ee",
+        accent_secondary="#7dd3fc",
+        accent_btn="#22d3ee",
+        accent_btn_hover="#67e8f9",
+        accent_btn_text="#0b1215",
+        text_primary="#e5e7eb",
+        text_secondary="#9ca3af",
+        text_muted="#6b7280",
+        user_badge_bg="#22d3ee",
+        user_badge_text="#0b1215",
+        user_name="#7dd3fc",
+        assistant_name="#22d3ee",
+        bg_new_btn="#1a1a1a",
+        syntax_theme="monokai",
+        bg_popup="#181818",
+        bg_hover="#232323",
     ),
 }
 
-DEFAULT_THEME = "tokyo-night"
+DEFAULT_THEME = "opencode"
 
 
 def get_theme(theme_id: str) -> Theme:
@@ -275,7 +301,7 @@ def generate_theme_css(theme: Theme) -> str:
     }}
 
     {p} #sessions > ListItem:hover,
-    {p} #sessions > ListItem.--highlight {{
+    {p} #sessions > ListItem.-highlight {{
         background: {hover_bg};
         color: {item_hover_text};
     }}
@@ -504,7 +530,7 @@ def generate_theme_css(theme: Theme) -> str:
     }}
 
     {p} .autocomplete-list > ListItem:hover,
-    {p} .autocomplete-list > ListItem.--highlight {{
+    {p} .autocomplete-list > ListItem.-highlight {{
         background: {user_hover_bg};
     }}
 
@@ -531,7 +557,7 @@ def generate_theme_css(theme: Theme) -> str:
     }}
 
     {p} #command-list > ListItem:hover,
-    {p} #command-list > ListItem.--highlight {{
+    {p} #command-list > ListItem.-highlight {{
         background: {user_hover_bg};
     }}
 
@@ -565,7 +591,7 @@ def generate_theme_css(theme: Theme) -> str:
     }}
 
     {p} #theme-list > ListItem:hover,
-    {p} #theme-list > ListItem.--highlight {{
+    {p} #theme-list > ListItem.-highlight {{
         background: {user_hover_bg};
         color: {theme.accent_primary};
     }}
@@ -615,6 +641,73 @@ def generate_theme_css(theme: Theme) -> str:
     {p} .topbar-mode-chat {{
         color: {theme.text_secondary};
         text-style: bold;
+    }}
+
+    /* ── Floating tiles (OpenCode layout) ─────────────────────── */
+
+    {p} #sidebar {{
+        background: {theme.bg_sidebar};
+        border: round {theme.border};
+    }}
+
+    {p} #brand-card,
+    {p} #nav-card,
+    {p} #recents-card,
+    {p} #settings-card {{
+        background: {theme.bg_card};
+        border: round {theme.border};
+    }}
+
+    {p} #topbar {{
+        background: {theme.bg_card};
+        border: round {theme.border};
+    }}
+
+    {p} .user-msg-card,
+    {p} .assistant-msg-box {{
+        background: {theme.bg_card};
+        border: round {theme.border};
+    }}
+
+    {p} .tool-step-card {{
+        background: {theme.bg_card};
+        border: round {theme.border};
+    }}
+
+    {p} .sug-card {{
+        background: {theme.bg_card};
+        border: round {theme.border};
+    }}
+
+    {p} .code-block {{
+        background: {theme.bg_code};
+        border: round {theme.border};
+    }}
+
+    {p} #prompt-card,
+    {p} #input-card {{
+        background: {theme.bg_card};
+        border: round {theme.border};
+    }}
+
+    {p} #prompt-card:focus-within,
+    {p} #input-card:focus-within {{
+        border: round {theme.border_accent};
+    }}
+
+    {p} #nav-new {{
+        background: {theme.bg_new_btn};
+        border: round {theme.border_accent};
+    }}
+
+    {p} #nav-settings {{
+        border: round transparent;
+    }}
+
+    {p} .autocomplete-popup,
+    {p} #command-palette {{
+        background: {popup_bg};
+        border: round {theme.border_accent};
     }}
     """
 

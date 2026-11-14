@@ -14,3 +14,13 @@ test_*.png
 test_*.svg
 real_snapshot.png
 real_snapshot.svg
+
+# Web frontend
+web/node_modules/
+web/dist/
+
+# OpenTUI client
+tui-ts/node_modules/
+
+# Python venv
+.venv/

@@ -1,0 +1,565 @@
+/**
+ * Terminal-level tests for the OpenTUI client.
+ *
+ * A small Bun server stands in for the Python backend, so these exercise the
+ * real renderer, the real key handling and the real SSE parsing.
+ */
+
+import { afterEach, describe, expect, test } from "bun:test"
+import { mkdtempSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { testRender } from "@opentui/solid"
+import type { TestRendererSetup } from "@opentui/core/testing"
+import { GemmaClient } from "./api"
+import { createChat } from "./chat"
+import { App } from "./app"
+import { activeThemeId, activeThemeMode, setTheme, setThemeMode } from "./theme"
+
+// Theme changes persist to prefs; keep them out of the real user config.
+process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), "gemma-tui-test-"))
+
+const NOW = new Date().toISOString()
+
+const MODELS = {
+  active: "test-model",
+  models: [
+    { name: "test-model", source: "current", active: true },
+    { name: "other-model", source: "local", active: false },
+  ],
+}
+
+const PROVIDERS = {
+  default: "llama.cpp",
+  active: { provider: "llama.cpp", model: "test-model" },
+  providers: [
+    {
+      id: "llama.cpp",
+      name: "llama.cpp (local)",
+      kind: "local",
+      base_url: "http://127.0.0.1:8080",
+      is_default: true,
+      default_model: "test-model",
+      models: MODELS.models,
+    },
+    {
+      id: "ollama",
+      name: "Ollama",
+      kind: "openai",
+      base_url: "http://127.0.0.1:11434",
+      is_default: false,
+      default_model: "qwen2.5-coder",
+      models: [{ name: "qwen2.5-coder", source: "remote", active: false }],
+    },
+  ],
+}
+
+const COMMANDS = {
+  commands: [
+    { name: "/new", description: "Start a new chat" },
+    { name: "/clear", description: "Clear this chat" },
+    { name: "/help", description: "Show commands and keys" },
+  ],
+}
+
+function sseResponse(events: string[]): Response {
+  const encoder = new TextEncoder()
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const event of events) controller.enqueue(encoder.encode(`data: ${event}\n\n`))
+      controller.close()
+    },
+  })
+  return new Response(body, {
+    headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" },
+  })
+}
+
+interface MockServer {
+  base: string
+  chatRequests: Array<{ session_id: string; message: string }>
+  agentRequests: Array<{ session_id: string; message: string }>
+  modeRequests: string[]
+  stop: () => void
+}
+
+function startMock(
+  replyTokens = ["Hello", " from", " the", " mock"],
+  options: { mode?: "chat" | "agent" } = {},
+): MockServer {
+  const chatRequests: Array<{ session_id: string; message: string }> = []
+  const agentRequests: Array<{ session_id: string; message: string }> = []
+  const modeRequests: string[] = []
+  const encoder = new TextEncoder()
+  let permissionStream: ReadableStreamDefaultController<Uint8Array> | null = null
+
+  const info = {
+    app: "gemma",
+    version: "0.1.0",
+    model: "test-model",
+    mode: options.mode ?? "chat",
+    workspace: "/tmp",
+    provider: "llama.cpp",
+    temperature: 0.7,
+    context_max: 8192,
+  }
+
+  const server = Bun.serve({
+    port: 0,
+    async fetch(request) {
+      const url = new URL(request.url)
+      const path = url.pathname
+
+      if (path === "/api/info") return Response.json(info)
+      if (path === "/api/sessions" && request.method === "GET") {
+        return Response.json({ sessions: [{ id: "s1", title: "First chat", updated_at: NOW, message_count: 0 }] })
+      }
+      if (path === "/api/sessions" && request.method === "POST") {
+        return Response.json({ id: "s2" }, { status: 201 })
+      }
+      if (path === "/api/sessions/s1") {
+        return Response.json({ id: "s1", title: "First chat", updated_at: NOW, messages: [] })
+      }
+      if (path === "/api/models" && request.method === "GET") return Response.json(MODELS)
+      if (path === "/api/models" && request.method === "POST") return Response.json({ ok: true })
+      if (path === "/api/providers") return Response.json(PROVIDERS)
+      if (path === "/api/mode" && request.method === "POST") {
+        const body = (await request.json()) as { mode: string }
+        modeRequests.push(body.mode)
+        info.mode = body.mode as "chat" | "agent"
+        return Response.json({ ok: true, mode: body.mode })
+      }
+      if (path === "/api/commands") return Response.json(COMMANDS)
+      if (path === "/api/pair") return Response.json({ pair: "http://127.0.0.1/pair?token=abc" })
+
+      if (path === "/api/chat" && request.method === "POST") {
+        const body = (await request.json()) as { session_id: string; message: string }
+        chatRequests.push(body)
+        return sseResponse([
+          JSON.stringify({ type: "start", session_id: body.session_id }),
+          ...replyTokens.map((token) => JSON.stringify({ type: "token", content: token })),
+          JSON.stringify({ type: "done", elapsed: 0.5, ttft: 0.1, tokens: replyTokens.length }),
+          "[DONE]",
+        ])
+      }
+
+      if (path === "/api/agent" && request.method === "POST") {
+        const body = (await request.json()) as { session_id: string; message: string }
+        agentRequests.push(body)
+        // Keep the stream open: the permission prompt is answered out of band.
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            permissionStream = controller
+            for (const event of [
+              JSON.stringify({ type: "start", session_id: body.session_id }),
+              JSON.stringify({ type: "run", run_id: "r1", session_id: body.session_id }),
+              JSON.stringify({ type: "step_start", content: { step: 1, max_steps: 2 } }),
+              JSON.stringify({
+                type: "tool_start",
+                content: { id: "t1", name: "read_file", args: { path: "README.md" }, step: 1 },
+              }),
+              JSON.stringify({
+                type: "permission_request",
+                id: "perm1",
+                run_id: "r1",
+                tool: "read_file",
+                action: "read",
+                resources: ["README.md"],
+                summary: "read README.md",
+                reason: "reading outside the prompt",
+                args: { path: "README.md" },
+              }),
+            ]) {
+              controller.enqueue(encoder.encode(`data: ${event}\n\n`))
+            }
+          },
+        })
+        return new Response(stream, {
+          headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" },
+        })
+      }
+
+      if (path.startsWith("/api/permissions/") && request.method === "POST") {
+        const body = (await request.json()) as { decision: string }
+        permissionStream?.enqueue(
+          encoder.encode(
+            `data: ${JSON.stringify({
+              type: "tool_finish",
+              content: { id: "t1", name: "read_file", result: "# Gemma", ok: true },
+            })}\n\n`,
+          ),
+        )
+        permissionStream?.enqueue(
+          encoder.encode(
+            `data: ${JSON.stringify({ type: "text", content: `decision=${body.decision}` })}\n\n`,
+          ),
+        )
+        permissionStream?.enqueue(
+          encoder.encode(`data: ${JSON.stringify({ type: "complete", content: "done" })}\n\n`),
+        )
+        permissionStream?.enqueue(encoder.encode("data: [DONE]\n\n"))
+        permissionStream?.close()
+        permissionStream = null
+        return Response.json({ ok: true, decision: body.decision })
+      }
+
+      return Response.json({ error: "not found" }, { status: 404 })
+    },
+  })
+
+  return {
+    base: `http://127.0.0.1:${server.port}`,
+    chatRequests,
+    agentRequests,
+    modeRequests,
+    stop: () => server.stop(true),
+  }
+}
+
+async function mount(mock: MockServer): Promise<{ setup: TestRendererSetup; chat: ReturnType<typeof createChat> }> {
+  const client = new GemmaClient(mock.base)
+  const chat = createChat(client)
+  await chat.load()
+  await chat.loadModels()
+  await chat.loadProviders()
+  await chat.loadCommands()
+
+  const setup = await testRender(() => <App chat={chat} />, { width: 110, height: 34 })
+  await setup.renderOnce()
+  return { setup, chat }
+}
+
+let current: MockServer | undefined
+let setupRef: TestRendererSetup | undefined
+
+afterEach(async () => {
+  await setupRef?.dispose()
+  setupRef = undefined
+  current?.stop()
+  current = undefined
+  setTheme("opencode")
+  setThemeMode("system")
+})
+
+describe("OpenTUI client", () => {
+  test("renders the Gemini-style home screen", async () => {
+    current = startMock()
+    const { setup } = await mount(current)
+    setupRef = setup
+
+    const frame = setup.captureCharFrame()
+    // Wordmark + greeting
+    expect(frame).toContain("▀")
+    expect(frame).toContain("Where should we start?")
+    // The prompt pill with real server data
+    expect(frame).toContain("Ask anything… (/ for commands)")
+    expect(frame).toContain("test-model")
+    expect(frame).toContain("llama.cpp")
+    expect(frame).toContain("tab mode")
+    expect(frame).toContain("ctrl+k models")
+    expect(frame).toContain("ctrl+p commands")
+    expect(frame).toContain("v0.1.0")
+    // No fake strings from the old landing
+    expect(frame).not.toContain("Fix broken tests")
+    expect(frame).not.toContain("Build")
+    expect(frame).not.toContain("Gemma 3 12B Local")
+    expect(frame).not.toContain("Ollama")
+    expect(frame).not.toContain("shift+tab agents")
+    expect(frame).not.toContain("0 MCP")
+    expect(frame).not.toContain("/mcps")
+    expect(frame).not.toContain("/update")
+    // The Gemini rail is visible on the home screen too
+    expect(frame).toContain("◆ gemma")
+    expect(frame).toContain("New chat")
+    expect(frame).toContain("Sessions")
+    // The unused Gemini nav items are gone
+    expect(frame).not.toContain("Library")
+    expect(frame).not.toContain("Scheduled")
+    expect(frame).not.toContain("More")
+    // Top bar: session title, model and version strip
+    expect(frame).toContain("First chat")
+  })
+
+  test("the sidebar New chat entry starts a chat", async () => {
+    current = startMock()
+    const { setup, chat } = await mount(current)
+    setupRef = setup
+
+    const lines = setup.captureCharFrame().split("\n")
+    const row = lines.findIndex((line) => line.includes("ctrl+n"))
+    const column = lines[row]?.indexOf("New chat") ?? -1
+    expect(row).toBeGreaterThanOrEqual(0)
+    expect(column).toBeGreaterThanOrEqual(0)
+
+    await setup.mockMouse.click(column + 2, row)
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    await setup.renderOnce()
+
+    expect(chat.activeId()).toBe("s2")
+  })
+
+  test("streams a chat reply into the feed", async () => {
+    current = startMock()
+    const { setup, chat } = await mount(current)
+    setupRef = setup
+
+    setup.mockInput.typeText("hi there")
+    setup.mockInput.pressEnter()
+
+    const frame = await setup.waitForFrame((text: string) => text.includes("Hello from the mock"))
+    expect(frame).toContain("gemma")
+    expect(frame).toContain("hi there")
+    expect(frame).toContain("❐ copy")
+    expect(frame).toContain("ctx ")
+    expect(frame).toContain("tab mode")
+    expect(current.chatRequests).toHaveLength(1)
+    expect(current.chatRequests[0]?.message).toBe("hi there")
+    expect(chat.streaming()).toBe(false)
+  })
+
+  test("opens the slash palette as soon as you type a slash", async () => {
+    current = startMock()
+    const { setup } = await mount(current)
+    setupRef = setup
+
+    setup.mockInput.typeText("/")
+    const frame = await setup.waitForFrame((text: string) => text.includes("Start a new chat"))
+    expect(frame).toContain("/new")
+    expect(frame).toContain("↑↓ navigate")
+  })
+
+  test("completes a command with Tab", async () => {
+    current = startMock()
+    const { setup } = await mount(current)
+    setupRef = setup
+
+    setup.mockInput.typeText("/cl")
+    await setup.waitForFrame((text: string) => text.includes("Clear this chat"))
+    setup.mockInput.pressTab()
+    await setup.renderOnce()
+
+    expect(setup.captureCharFrame()).toContain("/clear")
+  })
+
+  test("Tab switches chat and agent mode", async () => {
+    current = startMock()
+    const { setup, chat } = await mount(current)
+    setupRef = setup
+
+    setup.mockInput.pressTab()
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    await setup.renderOnce()
+
+    expect(current.modeRequests).toEqual(["agent"])
+    expect(chat.mode()).toBe("agent")
+    expect(setup.captureCharFrame()).toContain("agent")
+  })
+
+  test("opens the provider-grouped model picker with Ctrl+K", async () => {
+    current = startMock()
+    const { setup } = await mount(current)
+    setupRef = setup
+
+    setup.mockInput.pressKey("k", { ctrl: true })
+    const frame = await setup.waitForFrame((text: string) => text.includes("Select model"))
+    expect(frame).toContain("LLAMA.CPP (LOCAL)")
+    expect(frame).toContain("test-model")
+    expect(frame).toContain("OLLAMA")
+    expect(frame).toContain("qwen2.5-coder")
+    expect(frame).toContain("Enter select")
+  })
+
+  test("opens the theme picker with Ctrl+T", async () => {
+    current = startMock()
+    const { setup } = await mount(current)
+    setupRef = setup
+
+    setup.mockInput.pressKey("t", { ctrl: true })
+    const frame = await setup.waitForFrame((text: string) => text.includes("Theme"))
+    expect(frame).toContain("OpenCode")
+    expect(frame).toContain("Violet")
+    expect(frame).toContain("System")
+    expect(frame).toContain("terminal · dark")
+    expect(frame).toContain("mode")
+  })
+
+  test("cycles system, dark and light in the theme picker", async () => {
+    current = startMock()
+    const { setup } = await mount(current)
+    setupRef = setup
+
+    expect(activeThemeMode()).toBe("system")
+    setup.mockInput.pressKey("t", { ctrl: true })
+    await setup.waitForFrame((text: string) => text.includes("Theme"))
+
+    setup.mockInput.pressKey("m")
+    await setup.renderOnce()
+    expect(activeThemeMode()).toBe("dark")
+
+    setup.mockInput.pressKey("m")
+    await setup.renderOnce()
+    expect(activeThemeMode()).toBe("light")
+
+    setup.mockInput.pressKey("m")
+    await setup.renderOnce()
+    expect(activeThemeMode()).toBe("system")
+  })
+
+  test("selects the system theme from the picker", async () => {
+    current = startMock()
+    const { setup } = await mount(current)
+    setupRef = setup
+
+    setup.mockInput.pressKey("t", { ctrl: true })
+    await setup.waitForFrame((text: string) => text.includes("Theme"))
+    for (let index = 0; index < 4; index += 1) setup.mockInput.pressKey("ARROW_DOWN")
+    setup.mockInput.pressEnter()
+    await setup.renderOnce()
+
+    expect(activeThemeId()).toBe("system")
+  })
+
+  test("sets the theme and mode from /theme", async () => {
+    current = startMock()
+    const { setup } = await mount(current)
+    setupRef = setup
+
+    setup.mockInput.typeText("/theme light")
+    setup.mockInput.pressEnter()
+    await setup.renderOnce()
+    expect(activeThemeMode()).toBe("light")
+
+    setup.mockInput.typeText("/theme violet")
+    setup.mockInput.pressEnter()
+    await setup.renderOnce()
+    expect(activeThemeId()).toBe("violet")
+  })
+
+  test("opens help with F1", async () => {
+    current = startMock()
+    const { setup } = await mount(current)
+    setupRef = setup
+
+    setup.mockInput.pressKey("F1")
+    const frame = await setup.waitForFrame((text: string) => text.includes("Commands & keys"))
+    expect(frame).toContain("toggle sidebar")
+    expect(frame).toContain("switch chat / agent")
+  })
+
+  test("toggles the sidebar with Ctrl+B in chat", async () => {
+    current = startMock()
+    const { setup } = await mount(current)
+    setupRef = setup
+
+    // The rail is visible on the home screen from the start.
+    expect(setup.captureCharFrame()).toContain("Sessions")
+    setup.mockInput.pressKey("b", { ctrl: true })
+    await setup.renderOnce()
+    expect(setup.captureCharFrame()).not.toContain("Sessions")
+    setup.mockInput.pressKey("b", { ctrl: true })
+    await setup.renderOnce()
+    expect(setup.captureCharFrame()).toContain("Sessions")
+  })
+
+  test("runs leader commands with Ctrl+X", async () => {
+    current = startMock()
+    const { setup, chat } = await mount(current)
+    setupRef = setup
+
+    setup.mockInput.pressKey("x", { ctrl: true })
+    await setup.renderOnce()
+    expect(setup.captureCharFrame()).toContain("ctrl+x")
+
+    setup.mockInput.pressKey("n")
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    await setup.renderOnce()
+    expect(chat.sessions()[0]?.id).toBe("s2")
+    expect(chat.activeId()).toBe("s2")
+  })
+
+  test("mints a browser pairing link with Ctrl+W", async () => {
+    current = startMock()
+    const { setup } = await mount(current)
+    setupRef = setup
+
+    setup.mockInput.pressKey("w", { ctrl: true })
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    await setup.renderOnce()
+
+    expect(setup.captureCharFrame()).toContain("Pair a browser: http://127.0.0.1/pair?token=abc")
+  })
+
+  test("runs /clear from the composer", async () => {
+    current = startMock()
+    const { setup, chat } = await mount(current)
+    setupRef = setup
+
+    setup.mockInput.typeText("hi")
+    setup.mockInput.pressEnter()
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    await setup.renderOnce()
+    expect(chat.activeSession()?.messages).toHaveLength(2)
+
+    setup.mockInput.typeText("/clear")
+    await setup.renderOnce()
+    setup.mockInput.pressEnter()
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    await setup.renderOnce()
+
+    // The command is handled locally instead of being sent to the model.
+    expect(current.chatRequests).toHaveLength(1)
+    expect(chat.activeSession()?.messages).toHaveLength(0)
+  })
+
+  test("creates a new chat with Ctrl+N", async () => {
+    current = startMock()
+    const { setup, chat } = await mount(current)
+    setupRef = setup
+
+    setup.mockInput.pressKey("n", { ctrl: true })
+    // The session is created over HTTP, so give the fetch a real tick to land.
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    await setup.renderOnce()
+    expect(chat.sessions()[0]?.id).toBe("s2")
+    expect(chat.activeId()).toBe("s2")
+  })
+
+  test("Ctrl+P opens the slash palette inside a chat", async () => {
+    current = startMock()
+    const { setup } = await mount(current)
+    setupRef = setup
+
+    setup.mockInput.typeText("hi")
+    setup.mockInput.pressEnter()
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    await setup.renderOnce()
+
+    setup.mockInput.pressKey("p", { ctrl: true })
+    const frame = await setup.waitForFrame((text: string) => text.includes("Start a new chat"))
+    expect(frame).toContain("/new")
+  })
+
+  test("agent mode streams tool calls and answers a permission prompt", async () => {
+    current = startMock(["unused"], { mode: "agent" })
+    const { setup, chat } = await mount(current)
+    setupRef = setup
+
+    setup.mockInput.typeText("inspect the readme")
+    setup.mockInput.pressEnter()
+
+    const prompt = await setup.waitForFrame((text: string) => text.includes("Permission required"))
+    expect(prompt).toContain("read_file")
+    expect(prompt).toContain("read README.md")
+    expect(prompt).toContain("Allow once")
+
+    setup.mockInput.pressKey("y")
+    const frame = await setup.waitForFrame((text: string) => text.includes("decision=allow"))
+    expect(frame).toContain("read_file")
+    expect(frame).toContain("# Gemma")
+    expect(frame).not.toContain("Permission required")
+
+    expect(current.agentRequests).toHaveLength(1)
+    expect(chat.permission()).toBeNull()
+    expect(chat.streaming()).toBe(false)
+  })
+})

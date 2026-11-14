@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import getpass
+import json
 import os
 import re
 import subprocess
 import time
+import webbrowser
 from datetime import datetime
+from pathlib import Path
 
 from rich.markdown import Markdown
 from rich.syntax import Syntax
@@ -18,19 +21,49 @@ from textual.message import Message
 from textual.reactive import reactive
 from textual.screen import ModalScreen
 from textual.widget import MountError, Widget
-from textual.widgets import Input, Label, ListItem, ListView, Static, TextArea
+from textual.widgets import Button, Input, Label, ListItem, ListView, Static, TextArea
 
 from app.lifecycle import async_server_is_healthy, async_get_loaded_model
 from config.settings import Settings
 from core.agent import AgentOrchestrator, AgentEvent
 from core.client import LlamaClient
 from core.commands import COMMAND_DEFS, HELP_TEXT, parse_command
+from core.compaction import Compactor
+from core.lsp import LSPManager, lsp_tools
+from core.mcp import MCPManager
 from core.orchestrator import decide_search
+from core.permissions import (
+    PermissionDenied,
+    PermissionManager,
+    PermissionRequest,
+    PermissionRule,
+    default_rules,
+    parse_rule,
+)
 from core.research import search_context, web_search, check_searxng_health
+from core.skills import SkillsManager
 from core.titles import suggest_title
+from core.tooling import build_default_registry
 from core.tools import WorkspaceTools, AGENT_SYSTEM_PROMPT
 from sessions.store import SessionStore, format_session_timestamp
 from tui.themes import THEMES, DEFAULT_THEME, Theme, get_theme, generate_all_themes_css
+
+
+def format_incomplete_agent_message(failures: list[tuple[str, str]]) -> str:
+    """Honest fallback when the agent stops without producing final text."""
+    if not failures:
+        return (
+            "The agent stopped without a final answer. Review the tool output "
+            "above; the task may not be complete."
+        )
+    lines = ["The agent stopped without a final answer. Some tool calls failed:"]
+    for name, output in failures[-3:]:
+        detail = " ".join(str(output or "").split())
+        if len(detail) > 220:
+            detail = detail[:217] + "..."
+        lines.append(f"- `{name}`: {detail}")
+    lines.append("The task is not confirmed complete.")
+    return "\n".join(lines)
 
 
 def _load_unfiltered_prompt() -> str:
@@ -46,6 +79,16 @@ def _load_unfiltered_prompt() -> str:
 
 
 SYSTEM_PROMPT = _load_unfiltered_prompt()
+
+# Greetings never need a web-search decision. Skipping the judge call saves a
+# full extra model round-trip for "hi" / "thanks" / etc.
+_SMALLTALK_RE = re.compile(
+    r"^(hi|hey|hello|yo|sup|hiya)(\s+(gemma|there|bot|assistant|friend))?[\s!.,?]*$"
+    r"|^(thanks|thank you|thx|ok|okay|"
+    r"good (morning|afternoon|evening|night)|how are you|how's it going|"
+    r"what'?s up|bye|goodbye)[\s!.,?]*$",
+    re.IGNORECASE,
+)
 
 
 def _get_username() -> str:
@@ -77,6 +120,7 @@ class ChatMessage(Static):
         content: str,
         *,
         elapsed: float | None = None,
+        ttft: float | None = None,
         timestamp: str | None = None,
         syntax_theme: str = "monokai",
         **kwargs,
@@ -85,6 +129,7 @@ class ChatMessage(Static):
         self.role = role
         self.msg_content = content
         self.elapsed = elapsed
+        self.ttft = ttft
         self.msg_timestamp = timestamp or datetime.now().strftime("%I:%M %p")
         self.syntax_theme = syntax_theme
         self.add_class(f"role-{role}")
@@ -123,7 +168,10 @@ class ChatMessage(Static):
                 else:
                     yield Static(Markdown(self.msg_content), classes="msg-text")
                 if self.elapsed is not None:
-                    yield Static(f"⚡ {self.elapsed:.1f}s", classes="elapsed-badge")
+                    label = f"⚡ {self.elapsed:.1f}s"
+                    if self.ttft is not None and self.ttft >= 1.0:
+                        label += f" · first token {self.ttft:.1f}s"
+                    yield Static(label, classes="elapsed-badge")
 
 
 class ToolStepCard(Static):
@@ -146,22 +194,39 @@ class ToolStepCard(Static):
         self.result = result
 
     def _arg_summary(self) -> str:
-        if self.tool_name in ("read_file", "write_file", "edit_file"):
+        name = self.tool_name
+        if name in ("read", "read_file"):
             p = self.args.get("path", "")
-            if self.tool_name == "read_file":
-                s = self.args.get("start_line") or self.args.get("start")
-                e = self.args.get("end_line") or self.args.get("end")
-                if s and e:
-                    return f"{p}:{s}-{e}"
+            s = self.args.get("start_line") or self.args.get("start")
+            e = self.args.get("end_line") or self.args.get("end")
+            if s and e:
+                return f"{p}:{s}-{e}"
             return p
-        elif self.tool_name == "run_command":
-            return self.args.get("command", "")[:45]
-        elif self.tool_name == "grep_search":
-            q = self.args.get("query") or self.args.get("pattern", "")
-            return f"'{q}'"
-        elif self.tool_name == "list_dir":
-            return self.args.get("path", ".")
-        return str(self.args)[:40]
+        if name in ("write", "write_file", "edit", "edit_file"):
+            return str(self.args.get("path", ""))
+        if name in ("bash", "run_command", "shell"):
+            return str(self.args.get("command", ""))[:55]
+        if name in ("grep", "grep_search"):
+            q = self.args.get("pattern") or self.args.get("query", "")
+            include = self.args.get("include")
+            return f"'{q}'" + (f" in {include}" if include else "")
+        if name in ("glob", "glob_search"):
+            return str(self.args.get("pattern", ""))
+        if name in ("list_dir", "list", "ls"):
+            return str(self.args.get("path", "."))
+        if name in ("patch", "apply_patch"):
+            text = str(self.args.get("patch_text", ""))
+            files = re.findall(r"\*\*\* (?:Add|Update|Delete) File:\s*(.+)", text)
+            return ", ".join(files[:4]) if files else "multi-file patch"
+        if name.startswith("git_"):
+            return str(self.args.get("message") or self.args.get("path") or name)
+        if name.startswith("lsp_"):
+            return f"{self.args.get('path', '')}:{self.args.get('line', '')}"
+        if name == "skill":
+            return str(self.args.get("name", ""))
+        if name.startswith("mcp__"):
+            return name
+        return str(self.args)[:50]
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="tool-step-card"):
@@ -242,7 +307,7 @@ class ChatInput(TextArea):
             self.text = text
 
     def __init__(self, *args, **kwargs) -> None:
-        kwargs.setdefault("placeholder", "Ask Gemma anything... (type / for commands)")
+        kwargs.setdefault("placeholder", "Ask Gemma anything… (/ for commands)")
         kwargs.setdefault("highlight_cursor_line", False)
         kwargs.setdefault("show_line_numbers", False)
         kwargs.setdefault("soft_wrap", True)
@@ -374,7 +439,7 @@ class ThemePicker(ModalScreen[str | None]):
         color: #E2E8F0;
     }
     #theme-list > ListItem:hover,
-    #theme-list > ListItem.--highlight {
+    #theme-list > ListItem.-highlight {
         background: #162038;
         color: #38BDF8;
     }
@@ -434,6 +499,233 @@ class ThemePicker(ModalScreen[str | None]):
             self.query_one("#theme-list", ListView).action_cursor_up()
 
 
+class ModelItem(ListItem):
+    """ListItem displaying a model in the ModelPicker dialog."""
+
+    def __init__(self, name: str, active: bool = False, source: str = "") -> None:
+        self.model_name = name
+        marker = "● " if active else "  "
+        super().__init__(
+            Horizontal(
+                Static(f" {marker}{name}", classes="model-name"),
+                Static(source, classes="model-source"),
+            )
+        )
+
+
+class ModelPicker(ModalScreen[str | None]):
+    """Modal overlay to browse and select the active model."""
+
+    DEFAULT_CSS = """
+    ModelPicker {
+        align: center top;
+        background: rgba(10, 10, 10, 0.85);
+    }
+    #model-dialog {
+        width: 1fr;
+        max-width: 68;
+        height: auto;
+        margin-top: 5;
+        background: #181818;
+        border: round #22d3ee;
+        padding: 1 2;
+    }
+    #model-title {
+        text-style: bold;
+        color: #22d3ee;
+        height: 1;
+    }
+    #model-sub {
+        color: #6b7280;
+        height: 1;
+        margin-bottom: 1;
+    }
+    #model-list {
+        height: auto;
+        max-height: 14;
+        background: transparent;
+        border: none;
+        padding: 0;
+    }
+    #model-list > ListItem {
+        height: 2;
+        padding: 0 1;
+        color: #e5e7eb;
+    }
+    #model-list > ListItem:hover,
+    #model-list > ListItem.-highlight {
+        background: #232323;
+        color: #22d3ee;
+    }
+    .model-name {
+        width: 1fr;
+        text-style: bold;
+    }
+    .model-source {
+        width: auto;
+        color: #6b7280;
+    }
+    #model-hint {
+        height: 1;
+        margin-top: 1;
+        color: #6b7280;
+        content-align: center middle;
+    }
+    """
+
+    def __init__(self, current_model: str, models: list[tuple[str, str]]) -> None:
+        super().__init__()
+        self.current_model = current_model
+        self.models = models
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="model-dialog"):
+            yield Static("Select Model", id="model-title")
+            yield Static("Click a model to make it active", id="model-sub")
+            yield ListView(id="model-list")
+            yield Static("↑↓ move · Enter select · Esc cancel", id="model-hint")
+
+    def on_mount(self) -> None:
+        lst = self.query_one("#model-list", ListView)
+        lst.clear()
+        active_idx = 0
+        for i, (name, source) in enumerate(self.models):
+            active = name == self.current_model
+            if active:
+                active_idx = i
+            lst.append(ModelItem(name, active=active, source=source))
+        if lst.children:
+            lst.index = active_idx
+        lst.focus()
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        if isinstance(event.item, ModelItem):
+            self.dismiss(event.item.model_name)
+
+    def on_click(self, event: events.Click) -> None:
+        if event.widget is self:
+            self.dismiss(None)
+
+    def on_key(self, event) -> None:
+        if event.key == "escape":
+            event.stop()
+            self.dismiss(None)
+        elif event.key == "down":
+            event.stop()
+            self.query_one("#model-list", ListView).action_cursor_down()
+        elif event.key == "up":
+            event.stop()
+            self.query_one("#model-list", ListView).action_cursor_up()
+
+
+class SettingsItem(ListItem):
+    """A row in the SettingsMenu dialog."""
+
+    def __init__(self, key: str, label: str, value: str = "") -> None:
+        self.key = key
+        super().__init__(
+            Horizontal(
+                Static(f" {label}", classes="settings-label"),
+                Static(value, classes="settings-value"),
+            )
+        )
+
+
+class SettingsMenu(ModalScreen[str | None]):
+    """Small clickable settings menu: model, theme, modes, config."""
+
+    DEFAULT_CSS = """
+    SettingsMenu {
+        align: center top;
+        background: rgba(10, 10, 10, 0.85);
+    }
+    #settings-dialog {
+        width: 1fr;
+        max-width: 56;
+        height: auto;
+        margin-top: 5;
+        background: #181818;
+        border: round #22d3ee;
+        padding: 1 2;
+    }
+    #settings-title {
+        text-style: bold;
+        color: #22d3ee;
+        height: 1;
+        margin-bottom: 1;
+    }
+    #settings-list {
+        height: auto;
+        max-height: 12;
+        background: transparent;
+        border: none;
+        padding: 0;
+    }
+    #settings-list > ListItem {
+        height: 2;
+        padding: 0 1;
+        color: #e5e7eb;
+    }
+    #settings-list > ListItem:hover,
+    #settings-list > ListItem.-highlight {
+        background: #232323;
+        color: #22d3ee;
+    }
+    .settings-label {
+        width: 1fr;
+        text-style: bold;
+    }
+    .settings-value {
+        width: auto;
+        color: #9ca3af;
+    }
+    #settings-hint {
+        height: 1;
+        margin-top: 1;
+        color: #6b7280;
+        content-align: center middle;
+    }
+    """
+
+    def __init__(self, rows: list[tuple[str, str, str]]) -> None:
+        super().__init__()
+        self.rows = rows
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="settings-dialog"):
+            yield Static("Settings", id="settings-title")
+            yield ListView(id="settings-list")
+            yield Static("↑↓ move · Enter select · Esc close", id="settings-hint")
+
+    def on_mount(self) -> None:
+        lst = self.query_one("#settings-list", ListView)
+        lst.clear()
+        for key, label, value in self.rows:
+            lst.append(SettingsItem(key, label, value))
+        if lst.children:
+            lst.index = 0
+        lst.focus()
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        if isinstance(event.item, SettingsItem):
+            self.dismiss(event.item.key)
+
+    def on_click(self, event: events.Click) -> None:
+        if event.widget is self:
+            self.dismiss(None)
+
+    def on_key(self, event) -> None:
+        if event.key == "escape":
+            event.stop()
+            self.dismiss(None)
+        elif event.key == "down":
+            event.stop()
+            self.query_one("#settings-list", ListView).action_cursor_down()
+        elif event.key == "up":
+            event.stop()
+            self.query_one("#settings-list", ListView).action_cursor_up()
+
+
 class CommandItem(ListItem):
     """ListItem that carries a command name."""
     def __init__(self, cmd: str, desc: str) -> None:
@@ -488,7 +780,7 @@ class CommandPalette(ModalScreen[str | None]):
         color: #F1F5F9;
     }
     #command-list > ListItem:hover,
-    #command-list > ListItem.--highlight {
+    #command-list > ListItem.-highlight {
         background: #162038;
     }
     .command-key {
@@ -565,614 +857,89 @@ class CommandPalette(ModalScreen[str | None]):
                 self.dismiss(None)
 
 
+class PermissionScreen(ModalScreen[str]):
+    """Modal approval dialog for a tool call that needs permission."""
+
+    DEFAULT_CSS = """
+    PermissionScreen {
+        align: center middle;
+    }
+
+    #permission-dialog {
+        width: 86;
+        max-width: 94%;
+        height: auto;
+        background: $surface;
+        border: solid $accent;
+        padding: 1 2;
+    }
+
+    #permission-title {
+        text-style: bold;
+        color: $accent;
+        margin-bottom: 1;
+    }
+
+    #permission-summary {
+        text-style: bold;
+        margin-bottom: 1;
+    }
+
+    #permission-reason {
+        color: $text-muted;
+        margin-bottom: 1;
+    }
+
+    #permission-args {
+        background: $panel;
+        padding: 1;
+        margin-bottom: 1;
+        max-height: 12;
+        overflow-y: auto;
+    }
+
+    #permission-buttons {
+        height: auto;
+        align-horizontal: right;
+    }
+
+    #permission-buttons Button {
+        margin-left: 1;
+    }
+    """
+
+    BINDINGS = [("escape", "deny", "Deny")]
+
+    def __init__(self, request: PermissionRequest) -> None:
+        super().__init__()
+        self.request = request
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="permission-dialog"):
+            yield Static("⚠  Permission required", id="permission-title")
+            yield Static(self.request.summary(), id="permission-summary")
+            if self.request.reason:
+                yield Static(self.request.reason, id="permission-reason")
+            try:
+                args = json.dumps(self.request.args, indent=2, ensure_ascii=False)
+            except Exception:
+                args = str(self.request.args)
+            if len(args) > 1800:
+                args = args[:1800] + "\n... [truncated]"
+            yield Static(args, id="permission-args")
+            with Horizontal(id="permission-buttons"):
+                yield Button("Allow once", id="allow", variant="primary")
+                yield Button("Always allow", id="always")
+                yield Button("Deny", id="deny", variant="error")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id or "deny")
+
+    def action_deny(self) -> None:
+        self.dismiss("deny")
+
+
 # ── Main TUI Application ───────────────────────────────────────────────
-
-BASE_CSS = """
-Screen {
-    overflow: hidden;
-}
-
-* {
-    scrollbar-size-vertical: 1;
-}
-
-#shell {
-    height: 1fr;
-    width: 1fr;
-}
-
-#sidebar {
-    width: 30;
-    min-width: 26;
-    max-width: 32;
-    height: 1fr;
-    padding: 1 1 0 1;
-}
-
-#sidebar.hidden {
-    display: none;
-}
-
-#nav-toggle {
-    width: 3;
-    height: 1;
-    content-align: center middle;
-    margin-right: 1;
-    text-style: bold;
-}
-
-#nav-toggle:hover {
-    text-style: bold underline;
-}
-
-#sidebar-header {
-    height: auto;
-    padding: 0 1;
-    margin-bottom: 1;
-}
-
-#brand {
-    text-style: bold;
-    height: 1;
-}
-
-#brand-sub {
-    height: 1;
-}
-
-.nav-section-title {
-    text-style: bold;
-    padding: 0 1;
-    height: 1;
-    margin-top: 1;
-    margin-bottom: 0;
-}
-
-#nav-new {
-    height: 3;
-    padding: 0 1;
-    margin: 1 0;
-    content-align: left middle;
-    text-style: bold;
-}
-
-#nav-chats {
-    height: 3;
-    padding: 0 1;
-    margin: 0 0;
-    content-align: left middle;
-}
-
-#sessions {
-    height: 1fr;
-    background: transparent;
-    border: none;
-    padding: 0;
-    margin: 0;
-}
-
-#sessions > ListItem {
-    height: 3;
-    padding: 0 1;
-    border: none;
-    margin-bottom: 0;
-}
-
-.session-item-row {
-    width: 1fr;
-    height: 1;
-    align-vertical: middle;
-}
-
-.session-title {
-    width: 1fr;
-}
-
-.session-time {
-    width: auto;
-    text-style: none;
-}
-
-#nav-settings {
-    height: 3;
-    padding: 0 1;
-    content-align: left middle;
-}
-
-#workspace {
-    width: 1fr;
-    height: 1fr;
-}
-
-#topbar {
-    height: 3;
-    padding: 0 2;
-    align-vertical: middle;
-}
-
-#topbar-left {
-    width: 1fr;
-    height: 1;
-    align-vertical: middle;
-}
-
-#topbar-model {
-    width: auto;
-    text-style: bold;
-}
-
-#topbar-right {
-    width: auto;
-    height: 1;
-    align-vertical: middle;
-}
-
-#model-status {
-    width: auto;
-    margin-right: 1;
-    text-style: bold;
-}
-
-.topbar-divider {
-    width: auto;
-    margin: 0 1;
-}
-
-#topbar-time {
-    width: auto;
-    margin: 0 1;
-}
-
-#topbar-help {
-    width: auto;
-    text-style: bold;
-    padding: 0 1;
-}
-
-#topbar-mode {
-    width: auto;
-    text-style: bold;
-    padding: 0 1;
-    margin-right: 1;
-}
-
-#topbar-mode:hover {
-    text-style: bold underline;
-}
-
-.tool-step-card {
-    width: 1fr;
-    height: auto;
-    padding: 0 1;
-    margin-bottom: 1;
-}
-
-.tool-step-header {
-    width: 1fr;
-    height: 1;
-    align-vertical: middle;
-}
-
-.tool-icon {
-    width: 3;
-    text-style: bold;
-}
-
-.tool-name {
-    width: auto;
-    text-style: bold;
-    margin-right: 1;
-}
-
-.tool-target {
-    width: 1fr;
-    text-style: italic;
-}
-
-.tool-output-preview {
-    margin-top: 0;
-    padding: 0 1;
-    height: auto;
-    max-height: 4;
-}
-
-#landing {
-    height: 1fr;
-    align: center middle;
-}
-
-#landing-inner {
-    width: 1fr;
-    max-width: 84;
-    height: auto;
-    align: center middle;
-    padding: 0 1;
-}
-
-#landing-brand-box {
-    width: 1fr;
-    height: auto;
-    align: center middle;
-    margin-bottom: 2;
-}
-
-#landing-brand-title {
-    text-style: bold;
-    height: 1;
-    content-align: center middle;
-}
-
-#landing-sub {
-    margin-top: 1;
-    content-align: center middle;
-}
-
-#landing-suggestions {
-    width: 1fr;
-    max-width: 84;
-    height: auto;
-    min-height: 3;
-    margin-bottom: 2;
-    align: center middle;
-}
-
-.sug-card {
-    width: 1fr;
-    min-width: 16;
-    height: 3;
-    margin: 0 1;
-    padding: 0 1;
-    align-vertical: middle;
-}
-
-.sug-num {
-    width: 3;
-    height: 1;
-    content-align: center middle;
-    text-style: bold;
-    margin-right: 1;
-}
-
-.sug-text {
-    width: 1fr;
-    text-style: bold;
-}
-
-#prompt-card {
-    width: 1fr;
-    height: 4;
-    padding: 0 1;
-    align-vertical: middle;
-}
-
-#prompt {
-    width: 1fr;
-    height: 3;
-    background: transparent;
-    border: none;
-}
-
-#prompt:focus {
-    border: none;
-}
-
-.send-btn {
-    width: auto;
-    height: 3;
-    content-align: center middle;
-    padding: 0 2;
-    text-style: bold;
-}
-
-#chat-area {
-    height: 1fr;
-    width: 1fr;
-}
-
-#chat-scroll {
-    height: 1fr;
-    padding: 1 3;
-}
-
-#chat-messages {
-    width: 1fr;
-    height: auto;
-}
-
-.user-msg-card {
-    width: 1fr;
-    height: auto;
-    padding: 1 2;
-    margin-bottom: 1;
-}
-
-.user-msg-header {
-    width: 1fr;
-    height: 1;
-    margin-bottom: 1;
-    align-vertical: middle;
-}
-
-.user-avatar {
-    width: 3;
-    height: 1;
-    content-align: center middle;
-    text-style: bold;
-    margin-right: 1;
-}
-
-.user-name {
-    width: auto;
-    text-style: bold;
-    margin-right: 1;
-}
-
-.assistant-msg-box {
-    width: 1fr;
-    height: auto;
-    padding: 1 1;
-    margin-bottom: 1;
-}
-
-.assistant-msg-header {
-    width: 1fr;
-    height: 1;
-    margin-bottom: 1;
-    align-vertical: middle;
-}
-
-.assistant-avatar {
-    width: 2;
-    height: 1;
-    content-align: center middle;
-    text-style: bold;
-    margin-right: 1;
-}
-
-.assistant-name {
-    width: auto;
-    text-style: bold;
-    margin-right: 1;
-}
-
-.msg-time {
-    width: auto;
-    margin-right: 1;
-}
-
-.header-spacer {
-    width: 1fr;
-}
-
-.msg-copy {
-    width: auto;
-    padding: 0 1;
-}
-
-.msg-text {
-    width: 1fr;
-}
-
-.elapsed-badge {
-    width: auto;
-    height: 1;
-    margin-top: 1;
-    text-style: italic;
-}
-
-.code-block {
-    width: 1fr;
-    height: auto;
-    margin: 1 0;
-}
-
-.code-header {
-    width: 1fr;
-    height: 1;
-    padding: 0 1;
-    align-vertical: middle;
-}
-
-.code-lang {
-    width: 1fr;
-    text-style: bold;
-}
-
-.code-copy {
-    width: auto;
-}
-
-.code-content {
-    padding: 1 2;
-}
-
-#input-area {
-    height: 7;
-    padding: 0 3 1 3;
-}
-
-#input-card {
-    width: 1fr;
-    height: 4;
-    padding: 0 1;
-    align-vertical: middle;
-}
-
-#chat-prompt {
-    width: 1fr;
-    height: 3;
-    background: transparent;
-    border: none;
-    padding: 0;
-}
-
-#chat-prompt:focus {
-    border: none;
-}
-
-.input-footer {
-    width: 1fr;
-    height: 1;
-    margin-top: 1;
-    align-vertical: middle;
-}
-
-.footer-left {
-    width: 1fr;
-    height: 1;
-    align-vertical: middle;
-}
-
-.footer-cmd {
-    width: auto;
-    margin-right: 2;
-    text-style: bold;
-}
-
-.footer-hints {
-    width: auto;
-    text-align: right;
-}
-
-#statusbar {
-    height: 1;
-    padding: 0 2;
-    content-align: left middle;
-}
-
-.autocomplete-popup {
-    padding: 0;
-    margin: 0;
-    display: none;
-}
-
-.autocomplete-popup.visible {
-    display: block;
-}
-
-#landing-autocomplete {
-    width: 1fr;
-    max-width: 84;
-    max-height: 10;
-    margin-top: 1;
-}
-
-#chat-autocomplete {
-    width: 1fr;
-    margin: 0 3;
-    max-height: 8;
-}
-
-.autocomplete-list {
-    height: auto;
-    max-height: 8;
-    border: none;
-    padding: 0;
-    margin: 0;
-}
-
-.autocomplete-list > ListItem {
-    height: 2;
-    padding: 0 1;
-}
-
-.autocomplete-key {
-    text-style: bold;
-    width: auto;
-}
-
-.autocomplete-desc {
-    width: 1fr;
-}
-
-#command-palette {
-    width: 1fr;
-    max-width: 64;
-    height: auto;
-    margin-top: 6;
-    padding: 0;
-}
-
-#command-search {
-    height: 3;
-    border: none;
-    padding: 0 1;
-}
-
-#command-search:focus {
-    border: none;
-}
-
-#command-list {
-    height: auto;
-    max-height: 16;
-    border: none;
-    padding: 0;
-    margin: 0;
-}
-
-#command-list > ListItem {
-    height: 2;
-    padding: 0 1;
-}
-
-.command-key {
-    text-style: bold;
-    width: auto;
-}
-
-.command-desc {
-    width: 1fr;
-}
-
-.command-arrow {
-    width: auto;
-}
-
-#streaming-indicator {
-    width: 1fr;
-    height: auto;
-    margin-top: 1;
-    text-style: italic;
-}
-
-.hidden {
-    display: none;
-}
-
-.responsive-compact #topbar {
-    padding: 0 1;
-}
-
-.responsive-compact #topbar-time {
-    display: none;
-}
-
-.responsive-compact .topbar-divider-time {
-    display: none;
-}
-
-.responsive-compact #sug-3 {
-    display: none;
-}
-
-.responsive-compact .footer-hints {
-    display: none;
-}
-
-.responsive-compact #chat-scroll {
-    padding: 1 1;
-}
-
-.responsive-compact .user-msg-card {
-    padding: 1 1;
-}
-
-.responsive-compact #input-card {
-    margin: 0 1;
-}
-"""
-
 
 def _detect_screen_columns() -> int:
     """Detect full screen column capacity from window manager or fallback to 160."""
@@ -1200,7 +967,8 @@ def _detect_screen_columns() -> int:
 
 
 class GemmaTUI(App):
-    CSS = BASE_CSS + "\n" + generate_all_themes_css()
+    CSS_PATH = "gemma_tui.css"
+    CSS = generate_all_themes_css()
 
     BINDINGS = [
         ("ctrl+b", "toggle_sidebar", "Navbar"),
@@ -1212,6 +980,7 @@ class GemmaTUI(App):
         ("delete", "delete_session", "Delete"),
         ("ctrl+p", "command_palette", "Commands"),
         ("ctrl+t", "theme_picker", "Theme"),
+        ("ctrl+w", "web_ui", "Web"),
         ("ctrl+y", "copy_last_reply", "Copy"),
         ("escape", "close_autocomplete", ""),
         ("ctrl+enter", "submit_chat", "Send"),
@@ -1238,6 +1007,8 @@ class GemmaTUI(App):
         self.output_buffer = ""
         self.total_tokens = 0
         self.total_gen_count = 0
+        self.last_gen_tokens = 0
+        self.gen_time_active = 0.0
         self._autocomplete_visible = False
         self._autocomplete_index = 0
         self._pending_mounts: list[tuple[Vertical, Widget]] = []
@@ -1246,21 +1017,59 @@ class GemmaTUI(App):
         self.active_theme = get_theme(self.settings.theme)
         self._screen_cols: int = _detect_screen_columns()
         self._sidebar_visible: bool = True
+        self.web_server = None
         self._last_below_60: bool | None = None
+        self.context_max = max(2_000, int(getattr(settings, "context_limit", 32_768)))
+        self.last_provider = getattr(settings, "provider", "auto")
+        self._integrations_lock = asyncio.Lock()
+        self._warmup_task: asyncio.Task[bool] | None = None
+        self._warmup_ready = False
+        self._warmup_failed = False
+        self._mcp_started = False
+        self._mcp_error = ""
+
+        permission_rules: list[PermissionRule] = []
+        for raw in getattr(settings, "permission_rules", []) or []:
+            try:
+                permission_rules.append(parse_rule(raw))
+            except ValueError:
+                continue
+        self.permission_manager = PermissionManager(
+            mode=getattr(settings, "permission_mode", "auto"),
+            rules=permission_rules,
+            approval=self._ask_permission,
+            session_id=self.session_id,
+        )
+        self.skills: SkillsManager | None = None
+        if getattr(settings, "skills_enabled", True):
+            self.skills = SkillsManager(
+                settings.workspace_dir,
+                getattr(settings, "skills_dirs", []),
+            )
+        self.mcp: MCPManager | None = None
+        if getattr(settings, "mcp_enabled", True):
+            self.mcp = MCPManager(settings.workspace_dir, getattr(settings, "mcp_config", ".mcp.json"))
+        self.lsp: LSPManager | None = None
+        if getattr(settings, "lsp_enabled", True):
+            self.lsp = LSPManager(settings.workspace_dir)
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="shell"):
-            # ── Sidebar ──
+            # ── Left panel: navigation ──
             with Vertical(id="sidebar"):
-                with Vertical(id="sidebar-header"):
-                    yield Static("◆  GEMMA TUI", id="brand")
-                    yield Static("Local AI, In Your Terminal", id="brand-sub")
-                yield Static("NAVIGATION", id="nav-title", classes="nav-section-title")
-                yield Static("+  New Chat", id="nav-new")
-                yield Static("💬  Chats", id="nav-chats")
-                yield Static("RECENT CHATS", id="recents-title", classes="nav-section-title")
-                yield ListView(id="sessions")
-                yield Static("⚙  Settings", id="nav-settings")
+                with Vertical(id="brand-card"):
+                    with Vertical(id="sidebar-header"):
+                        yield Static("◆  GEMMA TUI", id="brand")
+                        yield Static("Local AI · offline", id="brand-sub")
+                with Vertical(id="nav-card"):
+                    yield Static("NAVIGATION", id="nav-title", classes="nav-section-title")
+                    yield Static("+  New Chat", id="nav-new")
+                    yield Static("💬  Chats", id="nav-chats")
+                with Vertical(id="recents-card"):
+                    yield Static("RECENT CHATS", id="recents-title", classes="nav-section-title")
+                    yield ListView(id="sessions")
+                with Vertical(id="settings-card"):
+                    yield Static("⚙  Settings", id="nav-settings")
 
             # ── Workspace ──
             with Vertical(id="workspace"):
@@ -1268,7 +1077,7 @@ class GemmaTUI(App):
                 with Horizontal(id="topbar"):
                     with Horizontal(id="topbar-left"):
                         yield Static("☰", id="nav-toggle", classes="nav-toggle-btn")
-                        yield Static(f"Model: {self.settings.model} ˅", id="topbar-model")
+                        yield Static(f"Model: {self._model_label()} ˅", id="topbar-model")
                     with Horizontal(id="topbar-right"):
                         yield Static(
                             "🤖 AGENT" if self.settings.agent_mode else "💬 CHAT",
@@ -1302,7 +1111,7 @@ class GemmaTUI(App):
 
                         with Horizontal(id="prompt-card"):
                             yield LandingInput(
-                                placeholder="Ask Gemma anything... (type / for commands)",
+                                placeholder="Ask Gemma anything… (/ for commands)",
                                 id="prompt",
                             )
                             yield Static("✈ Send", id="landing-send-btn", classes="send-btn")
@@ -1317,7 +1126,7 @@ class GemmaTUI(App):
                                 yield Static("/delete", id="cmd-delete", classes="footer-cmd cmd-delete")
                                 yield Static("/clear", id="cmd-clear", classes="footer-cmd cmd-clear")
                                 yield Static("/help", id="cmd-help", classes="footer-cmd cmd-help")
-                            yield Static("↑↓ Navigate  •  Enter Send  •  Ctrl+L Clear  •  Ctrl+Q Quit", id="footer-hints", classes="footer-hints")
+                            yield Static("↑↓ • Enter • Ctrl+L • Ctrl+Q", id="footer-hints", classes="footer-hints")
 
                         with Vertical(id="landing-autocomplete", classes="autocomplete-popup"):
                             yield ListView(id="landing-autocomplete-items", classes="autocomplete-list")
@@ -1345,7 +1154,7 @@ class GemmaTUI(App):
                                 yield Static("/delete", classes="footer-cmd cmd-delete")
                                 yield Static("/clear", classes="footer-cmd cmd-clear")
                                 yield Static("/help", classes="footer-cmd cmd-help")
-                            yield Static("↑↓ Navigate  •  Enter Send  •  Ctrl+L Clear  •  Ctrl+Q Quit", classes="footer-hints")
+                            yield Static("↑↓ • Enter • Ctrl+L • Ctrl+Q", classes="footer-hints")
 
     def on_mount(self) -> None:
         self.title = self.settings.title
@@ -1366,6 +1175,8 @@ class GemmaTUI(App):
 
     def on_resize(self, event: events.Resize) -> None:
         self._apply_responsive_layout(event.size.width, event.size.height)
+        # Layout settles after the resize event; refit the header text then.
+        self.call_after_refresh(self._update_model_label)
 
     def _apply_responsive_layout(self, width: int, height: int) -> None:
         if width <= 0:
@@ -1376,7 +1187,7 @@ class GemmaTUI(App):
             self._screen_cols = width
 
         threshold = self._screen_cols * 0.6
-        is_below_60 = width < threshold
+        is_below_60 = width < threshold or width < 104
 
         was_below_60 = self._last_below_60
         if was_below_60 != is_below_60:
@@ -1387,10 +1198,58 @@ class GemmaTUI(App):
                 self.toggle_sidebar(show=True, notify=False)
 
         try:
-            if is_below_60 or width < 96:
+            if is_below_60 or width < 112:
                 self.screen.add_class("responsive-compact")
             else:
                 self.screen.remove_class("responsive-compact")
+        except Exception:
+            pass
+
+        self._apply_footer_layout(width)
+        self.update_status_bar()
+
+    # Widths of the footer pieces, in terminal cells. These mirror the CSS
+    # above: every command is rendered with a one-cell right margin.
+    _FOOTER_ALL_COMMANDS = 54  # /new /mode /model /theme /rename /delete /clear /help
+    _FOOTER_COMPACT_COMMANDS = 31  # without /rename /delete /clear
+    _FOOTER_MINI_COMMANDS = 24  # without /rename /delete /clear /theme
+    _FOOTER_HINTS = 28  # "↑↓ • Enter • Ctrl+L • Ctrl+Q"
+
+    def _footer_available_width(self, width: int) -> int:
+        """Best estimate of the visible footer's inner width at this size."""
+        sidebar = 0
+        if getattr(self, "_sidebar_visible", True):
+            try:
+                sidebar = self.query_one("#sidebar", Vertical).outer_size.width
+            except Exception:
+                sidebar = 38
+        try:
+            landing_visible = not self.query_one("#landing", Container).has_class("hidden")
+        except Exception:
+            landing_visible = True
+        if landing_visible:
+            # #landing-inner is capped at 84 and padded by one cell per side.
+            return max(0, min(82, width - sidebar - 2))
+        # #input-area pads three cells per side.
+        return max(0, width - sidebar - 6)
+
+    def _apply_footer_layout(self, width: int) -> None:
+        """Hide footer items that would otherwise overlap at this width."""
+        if width <= 0:
+            return
+        footer = self._footer_available_width(width)
+        try:
+            screen = self.screen
+            for name, hidden in (
+                ("footer-tight", footer < self._FOOTER_ALL_COMMANDS + self._FOOTER_HINTS),
+                ("footer-compact", footer < self._FOOTER_ALL_COMMANDS),
+                ("footer-mini", footer < self._FOOTER_COMPACT_COMMANDS),
+                ("footer-nano", footer < self._FOOTER_MINI_COMMANDS),
+            ):
+                if hidden:
+                    screen.add_class(name)
+                else:
+                    screen.remove_class(name)
         except Exception:
             pass
 
@@ -1416,6 +1275,7 @@ class GemmaTUI(App):
                 if notify:
                     self.notify("Navbar hidden (Ctrl+B)", timeout=1.5)
             self._update_nav_toggle_button()
+            self._apply_footer_layout(self.size.width)
             return self._sidebar_visible
         except Exception:
             return False
@@ -1441,7 +1301,7 @@ class GemmaTUI(App):
             else:
                 mode_widget.update("💬 CHAT")
                 mode_widget.set_classes("topbar-mode-chat")
-            ph = "Ask Gemma to code, edit files, run bash... (type / for commands)" if self.settings.agent_mode else "Ask Gemma anything... (type / for commands)"
+            ph = "Ask Gemma to code, edit files… (/ for commands)" if self.settings.agent_mode else "Ask Gemma anything… (/ for commands)"
             try:
                 self.query_one("#prompt", LandingInput).placeholder = ph
             except Exception:
@@ -1460,6 +1320,16 @@ class GemmaTUI(App):
             self.settings.agent_mode = mode
         self.settings.save_agent_mode(self.settings.agent_mode)
         self._update_mode_display()
+        if self.settings.agent_mode:
+            # Prime the agent prefix the moment the user switches to agent mode.
+            self._start_warmup()
+        else:
+            # Chat mode does not use the agent prefix; stop a warmup that is
+            # still hogging the CPU so the next message is not stuck behind it.
+            task = self._warmup_task
+            if task is not None and not task.done():
+                task.cancel()
+                self._warmup_task = None
         state_str = "Agent (Autonomous Coding)" if self.settings.agent_mode else "Chat (Standard)"
         self.notify(f"Mode switched to: {state_str}")
         return self.settings.agent_mode
@@ -1484,11 +1354,67 @@ class GemmaTUI(App):
                 if detected and detected != self.settings.model:
                     self.settings.model = detected
                     self.settings.save_model(detected)
+                self._start_warmup()
             else:
                 status_widget.update("○  DISCONNECTED")
                 status_widget.styles.color = "#EF4444"
             self.update_status_bar()
         except Exception:
+            pass
+
+    # ── Prompt cache warmup ─────────────────────────────────────────────
+
+    def _start_warmup(self) -> None:
+        """Prime the model prompt cache in the background (best effort)."""
+        if not getattr(self.settings, "agent_warmup", True):
+            return
+        if not self.settings.agent_mode:
+            # Chat mode uses a tiny system prompt, so there is nothing worth
+            # caching. Priming the agent prefix here only competes with the
+            # user's first message on CPU-only servers (it cost 60-110s).
+            return
+        if self._warmup_ready or self._warmup_failed:
+            return
+        if getattr(self, "is_headless", False):
+            return
+        task = self._warmup_task
+        if task is not None and not task.done():
+            return
+        self._warmup_task = asyncio.create_task(self._warmup_prompt_cache())
+
+    async def _warmup_prompt_cache(self) -> bool:
+        try:
+            registry = await self._build_agent_registry()
+            orchestrator = AgentOrchestrator(
+                client=self.client,
+                tools=WorkspaceTools(root_dir=self.settings.workspace_dir),
+                settings=self.settings,
+                max_steps=1,
+                registry=registry,
+                skills=self.skills,
+            )
+            ok = await orchestrator.warmup()
+        except Exception:  # noqa: BLE001 - warmup must never break the app
+            ok = False
+        self._warmup_ready = ok
+        self._warmup_failed = not ok
+        return ok
+
+    async def _await_warmup(self) -> None:
+        """Wait for an in-flight warmup so the real request does not compete.
+
+        llama.cpp processes requests in slots; running the warmup and the real
+        prompt at the same time would make both slower. The warmup primes the
+        exact prefix the real request needs, so waiting is not wasted work.
+        """
+        task = self._warmup_task
+        if task is None or task.done():
+            return
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=900)
+        except asyncio.TimeoutError:
+            task.cancel()
+        except Exception:  # noqa: BLE001
             pass
 
     # ── Theme Management ────────────────────────────────────────────────
@@ -1506,12 +1432,111 @@ class GemmaTUI(App):
             pass
         self.settings.save_theme(self.active_theme.id)
         self.notify(f"Theme switched to {self.active_theme.name}")
+        self.update_status_bar()
+
+    # ── Web UI ──────────────────────────────────────────────────────────
+
+    def ensure_web_server(self):
+        """Start the local web UI server, sharing this TUI's session store."""
+        server = getattr(self, "web_server", None)
+        if server is not None and server.running:
+            return server
+
+        from core.webui import GemmaWebServer
+
+        port = 0 if getattr(self, "is_headless", False) else 47317
+        try:
+            server = GemmaWebServer(self.settings, store=self.store, port=port)
+            server.start()
+        except Exception as exc:  # noqa: BLE001 - the TUI must keep working
+            self.notify(f"Web UI failed to start: {exc}", severity="error")
+            self.web_server = None
+            return None
+        self.web_server = server
+        return server
+
+    async def action_web_ui(self) -> None:
+        await self.run_command("web", "")
+
+    def on_unmount(self) -> None:
+        server = getattr(self, "web_server", None)
+        if server is not None:
+            server.stop()
+            self.web_server = None
 
     def action_theme_picker(self) -> None:
         def on_theme_selected(theme_id: str | None) -> None:
             if theme_id:
                 self.switch_theme(theme_id)
         self.push_screen(ThemePicker(self.active_theme.id), on_theme_selected)
+
+    # ── Model Management ────────────────────────────────────────────────
+
+    def action_model_picker(self) -> None:
+        asyncio.create_task(self.open_model_picker())
+
+    async def _collect_models(self) -> list[tuple[str, str]]:
+        """Current, server-loaded and local GGUF models, de-duplicated."""
+        entries: list[tuple[str, str]] = []
+        seen: set[str] = set()
+
+        def add(name: str, source: str) -> None:
+            name = (name or "").strip()
+            if name and name not in seen:
+                seen.add(name)
+                entries.append((name, source))
+
+        add(self.settings.model, "current")
+        try:
+            loaded = await async_get_loaded_model(self.settings.base_url)
+            if loaded:
+                add(loaded, "loaded")
+        except Exception:
+            pass
+        try:
+            models_dir = Path(__file__).parent.parent / "models"
+            for path in sorted(models_dir.glob("*.gguf")):
+                add(path.name, "local")
+        except Exception:
+            pass
+        return entries
+
+    async def open_model_picker(self) -> None:
+        models = await self._collect_models()
+
+        def on_model_selected(model: str | None) -> None:
+            if not model or model == self.settings.model:
+                return
+            self.settings.save_model(model)
+            self.update_status_bar()
+            self.notify(f"Model set to {model}", timeout=2)
+
+        self.push_screen(ModelPicker(self.settings.model, models), on_model_selected)
+
+    # ── Settings Menu ───────────────────────────────────────────────────
+
+    def action_settings_menu(self) -> None:
+        rows = [
+            ("model", "Model", self._model_label(26)),
+            ("theme", "Theme", self.active_theme.name),
+            ("mode", "Mode", "Agent" if self.settings.agent_mode else "Chat"),
+            ("permissions", "Permissions", self.settings.permission_mode),
+            ("config", "Show config", ""),
+        ]
+
+        def on_selected(key: str | None) -> None:
+            if key == "model":
+                self.action_model_picker()
+            elif key == "theme":
+                self.action_theme_picker()
+            elif key == "mode":
+                self.toggle_mode()
+            elif key == "permissions":
+                self._populate_command_input("/permissions mode ")
+            elif key == "config":
+                asyncio.create_task(self.run_command("config", ""))
+
+        self.push_screen(SettingsMenu(rows), on_selected)
 
     # ── Session Management ──────────────────────────────────────────────
 
@@ -1553,7 +1578,17 @@ class GemmaTUI(App):
             return
 
         self.show_chat()
+        tool_results: dict[str, str] = {}
         for message in messages:
+            if message.get("role") == "tool":
+                call_id = message.get("tool_call_id") or ""
+                if call_id:
+                    tool_results[call_id] = message.get("content", "")
+
+        step = 0
+        for message in messages:
+            role = message.get("role", "")
+            content = message.get("content", "")
             ts_str = None
             if message.get("created_at"):
                 try:
@@ -1561,7 +1596,39 @@ class GemmaTUI(App):
                     ts_str = dt.strftime("%I:%M %p")
                 except Exception:
                     ts_str = message["created_at"]
-            self.write_message(message["role"], message["content"], timestamp=ts_str)
+
+            if role == "system":
+                continue
+            if role == "tool":
+                continue
+
+            metadata = message.get("metadata") or {}
+            if role == "assistant" and metadata.get("tool_calls"):
+                for call in metadata["tool_calls"]:
+                    step += 1
+                    function = call.get("function") or {}
+                    name = function.get("name", "tool")
+                    try:
+                        args = json.loads(function.get("arguments") or "{}")
+                    except Exception:
+                        args = {}
+                    result = tool_results.get(call.get("id", ""), "")
+                    status = "error" if result.startswith("Error") else "done"
+                    card = ToolStepCard(
+                        tool_name=name,
+                        args=args if isinstance(args, dict) else {},
+                        step=step,
+                        status=status,
+                        result=result,
+                    )
+                    self._mount_or_queue(container, card)
+                if content.strip():
+                    self.write_message("assistant", content, timestamp=ts_str)
+                continue
+
+            if role in ("user", "assistant") and content.strip():
+                self.write_message(role, content, timestamp=ts_str)
+
         scroll = self.query_one("#chat-scroll", VerticalScroll)
         scroll.scroll_end(animate=False)
 
@@ -1573,12 +1640,14 @@ class GemmaTUI(App):
         content: str,
         elapsed: float | None = None,
         timestamp: str | None = None,
+        ttft: float | None = None,
     ) -> None:
         container = self.query_one("#chat-messages", Vertical)
         msg = ChatMessage(
             role,
             content,
             elapsed=elapsed if role == "assistant" else None,
+            ttft=ttft if role == "assistant" else None,
             timestamp=timestamp,
             syntax_theme=self.active_theme.syntax_theme,
         )
@@ -1762,7 +1831,7 @@ class GemmaTUI(App):
                 self.session_id
             )
 
-            if self.websearch_enabled:
+            if self.websearch_enabled and not _SMALLTALK_RE.match(latest_user_text.strip()):
                 latest_user = next((m for m in reversed(messages) if m["role"] == "user"), None)
                 if latest_user:
                     indicator.update("✦ Gemma is thinking...")
@@ -1782,14 +1851,21 @@ class GemmaTUI(App):
                         if context:
                             messages.insert(1, {"role": "system", "content": context})
 
+            tokens_before = self.total_tokens
+            first_token_at: float | None = None
             async for chunk in self.client.stream_chat(messages):
+                if first_token_at is None and chunk:
+                    first_token_at = time.monotonic()
                 self.output_buffer += chunk
                 self.total_tokens += 1
                 indicator.update(Text(f"✦ {self.output_buffer}"))
                 scroll.scroll_end(animate=False)
 
             elapsed = max(time.monotonic() - started, 0.001)
+            ttft = (first_token_at - started) if first_token_at else elapsed
             self.gen_time = elapsed
+            self.last_gen_tokens = self.total_tokens - tokens_before
+            self.gen_time_active = max(elapsed - ttft, 0.001)
             self.token_count = len(self.output_buffer.split())
             self.context_used = min(
                 self.context_used + self.token_count, self.context_max
@@ -1800,7 +1876,9 @@ class GemmaTUI(App):
             except Exception:
                 pass
             now = datetime.now().strftime("%I:%M %p")
-            self.write_message("assistant", self.output_buffer, elapsed=elapsed, timestamp=now)
+            self.write_message(
+                "assistant", self.output_buffer, elapsed=elapsed, ttft=ttft, timestamp=now
+            )
             self.store.add_message(self.session_id, "assistant", self.output_buffer)
             self._kick_off_titling()
 
@@ -1825,6 +1903,58 @@ class GemmaTUI(App):
             self.is_streaming = False
             self.update_status_bar()
 
+    async def _ask_permission(self, request: PermissionRequest) -> str:
+        """Show a modal and await the user's decision."""
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[str] = loop.create_future()
+
+        def done(result: str | None) -> None:
+            if not future.done():
+                future.set_result(result or "deny")
+
+        try:
+            self.push_screen(PermissionScreen(request), done)
+        except Exception:
+            return "deny"
+        try:
+            return await asyncio.wait_for(future, timeout=300)
+        except asyncio.TimeoutError:
+            return "deny"
+
+    async def _build_agent_registry(self):
+        registry = build_default_registry()
+        if self.skills is not None:
+            try:
+                self.skills.reload()
+                for spec in self.skills.tool_specs():
+                    if registry.get(spec.name) is None:
+                        registry.register(spec)
+            except Exception:
+                pass
+        if self.lsp is not None:
+            try:
+                for spec in lsp_tools(self.lsp):
+                    if registry.get(spec.name) is None:
+                        registry.register(spec)
+            except Exception:
+                pass
+        if self.mcp is not None:
+            async with self._integrations_lock:
+                if not self._mcp_started:
+                    try:
+                        await self.mcp.start()
+                    except Exception as exc:  # noqa: BLE001
+                        self._mcp_error = str(exc)
+                    finally:
+                        # Avoid a slow 20s retry on every message; /mcp reload
+                        # clears this when the user changes the config.
+                        self._mcp_started = True
+            try:
+                self.mcp.register_tools(registry)
+            except Exception:
+                pass
+        return registry
+
     async def _stream_agent_reply(
         self,
         container: Vertical,
@@ -1835,50 +1965,145 @@ class GemmaTUI(App):
         indicator.update("✦ Initializing Autonomous Coding Agent...")
         scroll.scroll_end(animate=False)
 
+        try:
+            registry = await self._build_agent_registry()
+        except Exception as exc:  # noqa: BLE001
+            registry = build_default_registry()
+            self.notify(f"Integration setup warning: {exc}", severity="warning")
+
         tools = WorkspaceTools(root_dir=self.settings.workspace_dir)
+        self.permission_manager.session_id = self.session_id
+        self.permission_manager.approval = self._ask_permission
         orchestrator = AgentOrchestrator(
             client=self.client,
             tools=tools,
+            settings=self.settings,
             max_steps=self.settings.agent_max_steps,
-            confirm_commands=self.settings.agent_confirm_commands,
+            registry=registry,
+            permission=self.permission_manager,
+            approval=self._ask_permission,
+            store=self.store,
+            session_id=self.session_id,
+            skills=self.skills,
         )
 
-        messages = self.store.messages(self.session_id)
+        messages = self.store.context_messages(self.session_id)
         active_cards: dict[str, ToolStepCard] = {}
         current_thought = ""
+        current_reasoning = ""
         final_answer = ""
+        last_usage: dict[str, int] = {}
+        failed_tools: list[tuple[str, str]] = []
+        current_step = 0
+        max_steps = getattr(self.settings, "agent_max_steps", 10)
+        phase = "initializing"
+        active_tool = ""
 
+        def _tail(text: str, limit: int = 110) -> str:
+            text = " ".join(text.split())
+            return text if len(text) <= limit else "..." + text[-limit:]
+
+        def _render_status() -> None:
+            elapsed = time.monotonic() - started
+            icon = {
+                "reasoning": "🧠",
+                "writing": "🤖",
+                "tool": "⏳",
+            }.get(phase, "✦")
+            if phase == "initializing":
+                body = "initializing agent..."
+            elif phase == "warming_up":
+                body = "warming up model (the first request is the slowest)..."
+            elif phase == "waiting":
+                body = "waiting for model..."
+            elif phase == "reasoning":
+                body = _tail(current_reasoning) or "thinking..."
+            elif phase == "writing":
+                body = _tail(current_thought) or "writing..."
+            elif phase == "tool":
+                body = f"running {active_tool}..." if active_tool else "running tool..."
+            elif phase == "analyzing":
+                body = "analyzing result..."
+            else:
+                body = ""
+            step_text = f"Step {current_step}/{max_steps}" if current_step else "Starting"
+            try:
+                indicator.update(Text(f"{icon} {step_text} · {elapsed:.0f}s · {body}"))
+            except Exception:
+                pass
+
+        status_timer = self.set_interval(1.0, _render_status)
+        _render_status()
+
+        if self._warmup_task is not None and not self._warmup_task.done():
+            phase = "warming_up"
+            _render_status()
+            await self._await_warmup()
+            phase = "waiting"
+            _render_status()
+
+        tokens_before = self.total_tokens
         try:
             async for event in orchestrator.run(messages):
-                if event.type == "thought":
+                if event.type == "text":
                     chunk = str(event.content)
                     current_thought += chunk
                     self.total_tokens += 1
-                    preview = current_thought.strip().replace("\n", " ")
-                    if len(preview) > 80:
-                        preview = "..." + preview[-80:]
-                    indicator.update(Text(f"🤖 {preview}"))
+                    phase = "writing"
+                    _render_status()
                     scroll.scroll_end(animate=False)
+
+                elif event.type == "reasoning":
+                    current_reasoning += str(event.content)
+                    phase = "reasoning"
+                    _render_status()
+                    scroll.scroll_end(animate=False)
+
+                elif event.type == "step_start":
+                    info = event.content or {}
+                    try:
+                        current_step = int(info.get("step") or current_step)
+                    except (TypeError, ValueError):
+                        pass
+                    try:
+                        max_steps = int(info.get("max_steps") or max_steps)
+                    except (TypeError, ValueError):
+                        pass
+                    current_reasoning = ""
+                    current_thought = ""
+                    phase = "waiting"
+                    _render_status()
+
+                elif event.type == "provider":
+                    info = event.content or {}
+                    self.last_provider = info.get("name", self.last_provider)
+                    self.update_status_bar()
 
                 elif event.type == "tool_start":
                     info = event.content
                     step_num = info.get("step", 1)
                     t_name = info.get("name", "")
                     t_args = info.get("args", {})
-                    card_key = f"{step_num}_{t_name}"
+                    call_id = info.get("id") or f"{step_num}_{t_name}"
 
-                    indicator.update(f"⏳ Running {t_name}...")
+                    current_step = step_num
+                    phase = "tool"
+                    active_tool = t_name
+                    _render_status()
                     card = ToolStepCard(
                         tool_name=t_name,
                         args=t_args,
                         step=step_num,
                         status="running",
                     )
-                    active_cards[card_key] = card
+                    active_cards[call_id] = card
                     try:
                         container.mount(card, before=indicator)
                     except Exception:
-                        container.mount(card)
+                        try:
+                            container.mount(card)
+                        except Exception:
+                            pass
                     scroll.scroll_end(animate=False)
                     current_thought = ""
 
@@ -1887,13 +2112,45 @@ class GemmaTUI(App):
                     step_num = info.get("step", 1)
                     t_name = info.get("name", "")
                     res = str(info.get("result", ""))
-                    card_key = f"{step_num}_{t_name}"
-                    card = active_cards.get(card_key)
+                    call_id = info.get("id") or f"{step_num}_{t_name}"
+                    card = active_cards.get(call_id)
+                    ok = bool(info.get("ok", not res.startswith("Error")))
+                    if not ok:
+                        failed_tools.append((t_name, res))
                     if card:
-                        status = "error" if res.startswith("Error") else "done"
+                        status = "done" if ok else "error"
                         card.update_status(status=status, result=res)
-                    indicator.update("✦ Analyzing result...")
+                    phase = "analyzing"
+                    active_tool = ""
+                    _render_status()
                     scroll.scroll_end(animate=False)
+
+                elif event.type == "usage":
+                    last_usage.update(event.content or {})
+                    output = last_usage.get("output_tokens")
+                    if output:
+                        self.total_tokens = max(self.total_tokens, int(output))
+                    context_tokens = last_usage.get("input_tokens")
+                    if context_tokens:
+                        self.context_used = min(int(context_tokens), self.context_max)
+                    self.update_status_bar()
+
+                elif event.type == "compaction":
+                    info = event.content or {}
+                    self.notify(
+                        f"Context compacted ({info.get('before_tokens', '?')} → "
+                        f"{info.get('after_tokens', '?')} tokens)"
+                    )
+                    indicator.update("✦ Context compacted, continuing...")
+
+                elif event.type == "compaction_error":
+                    self.notify(f"Compaction warning: {event.content}", severity="warning")
+
+                elif event.type == "completion_warning":
+                    self.notify(
+                        "The agent tried to finish while tool calls were still failing.",
+                        severity="warning",
+                    )
 
                 elif event.type == "complete":
                     final_answer = str(event.content)
@@ -1903,6 +2160,8 @@ class GemmaTUI(App):
 
             elapsed = max(time.monotonic() - started, 0.001)
             self.gen_time = elapsed
+            self.last_gen_tokens = self.total_tokens - tokens_before
+            self.gen_time_active = elapsed
 
             try:
                 indicator.remove()
@@ -1914,14 +2173,23 @@ class GemmaTUI(App):
             if not clean_reply and current_thought:
                 clean_reply = current_thought.strip()
             if not clean_reply:
-                clean_reply = "Task completed."
+                clean_reply = format_incomplete_agent_message(failed_tools)
 
             self.output_buffer = clean_reply
             self.token_count = len(clean_reply.split())
             self.context_used = min(self.context_used + self.token_count, self.context_max)
 
             self.write_message("assistant", clean_reply, elapsed=elapsed, timestamp=now)
-            self.store.add_message(self.session_id, "assistant", clean_reply)
+            # The agent persists its own messages. Only add a fallback if the
+            # final text was not already stored (e.g. an empty provider reply).
+            stored = self.store.messages(self.session_id)
+            last = stored[-1] if stored else None
+            if not (
+                last
+                and last.get("role") == "assistant"
+                and last.get("content") == clean_reply
+            ):
+                self.store.add_message(self.session_id, "assistant", clean_reply)
             self._kick_off_titling()
 
         except asyncio.CancelledError:
@@ -1931,6 +2199,7 @@ class GemmaTUI(App):
                 pass
             now = datetime.now().strftime("%I:%M %p")
             self.write_message("assistant", "*[Agent task cancelled]*", timestamp=now)
+            self.store.add_message(self.session_id, "assistant", "*[Agent task cancelled]*")
         except Exception as exc:
             try:
                 indicator.remove()
@@ -1938,7 +2207,12 @@ class GemmaTUI(App):
                 pass
             now = datetime.now().strftime("%I:%M %p")
             self.write_message("assistant", f"**Agent Exception:** `{exc}`", timestamp=now)
+            self.store.add_message(self.session_id, "assistant", f"**Agent Exception:** `{exc}`")
         finally:
+            try:
+                status_timer.stop()
+            except Exception:
+                pass
             self.is_streaming = False
             self.update_status_bar()
 
@@ -2069,6 +2343,34 @@ class GemmaTUI(App):
             lines = "\n".join(f"  {key}: {value}" for key, value in data.items())
             now = datetime.now().strftime("%I:%M %p")
             self.write_message("assistant", f"Config:\n{lines}", timestamp=now)
+        elif name == "web":
+            self.show_chat()
+            await asyncio.sleep(0)
+            now = datetime.now().strftime("%I:%M %p")
+            server = self.ensure_web_server()
+            if server is None:
+                self.write_message(
+                    "assistant",
+                    "Web UI could not start. Check the terminal for the error.",
+                    timestamp=now,
+                )
+            else:
+                url = server.new_pairing_url()
+                try:
+                    await asyncio.to_thread(webbrowser.open, url)
+                    opened = True
+                except Exception:
+                    opened = False
+                self.write_message(
+                    "assistant",
+                    "# Web UI\n\n"
+                    f"{'Opened' if opened else 'Open this link'} in your browser:\n\n"
+                    f"`{url}`\n\n"
+                    f"Server: `{server.base_url}` — shared with this TUI's sessions.\n\n"
+                    "The link works once and expires in 5 minutes. "
+                    "Run `/web` again for a fresh one.",
+                    timestamp=now,
+                )
         elif name == "websearch":
             self.show_chat()
             sub = args.strip()
@@ -2139,6 +2441,246 @@ class GemmaTUI(App):
                     f"- `/websearch test <query>` - Run quick test search",
                     timestamp=now,
                 )
+        elif name == "permissions":
+            self.show_chat()
+            await asyncio.sleep(0)
+            now = datetime.now().strftime("%I:%M %p")
+            sub = args.strip()
+            parts = sub.split()
+            if not sub or parts[0].lower() == "status":
+                self.write_message(
+                    "assistant",
+                    self.permission_manager.describe()
+                    + "\n\nUse `/permissions mode auto|ask|readonly`, "
+                    "`/permissions allow <action> <pattern>`, "
+                    "`/permissions deny <action> <pattern>`, or `/permissions reset`.",
+                    timestamp=now,
+                )
+            elif parts[0].lower() == "mode" and len(parts) > 1:
+                mode = parts[1].lower()
+                try:
+                    self.settings.save_permission_mode(mode)
+                except ValueError as exc:
+                    self.write_message("assistant", f"Error: {exc}", timestamp=now)
+                    return
+                rules: list[PermissionRule] = []
+                for raw in self.settings.permission_rules:
+                    try:
+                        rules.append(parse_rule(raw))
+                    except ValueError:
+                        continue
+                self.permission_manager = PermissionManager(
+                    mode=mode,
+                    rules=rules,
+                    approval=self._ask_permission,
+                    session_id=self.session_id,
+                )
+                self.write_message(
+                    "assistant", f"Permission mode set to **{mode}**.", timestamp=now
+                )
+            elif parts[0].lower() in ("allow", "deny", "ask"):
+                if len(parts) < 2:
+                    self.write_message(
+                        "assistant",
+                        "Usage: `/permissions allow|deny|ask <action> <pattern>`",
+                        timestamp=now,
+                    )
+                    return
+                effect = parts[0].lower()
+                action = parts[1]
+                pattern = " ".join(parts[2:]) or "*"
+                rule = PermissionRule(action, pattern, effect)
+                self.permission_manager.add_rule(rule)
+                self.settings.permission_rules.append(str(rule))
+                self.settings.save_permission_rules(self.settings.permission_rules)
+                self.write_message(
+                    "assistant", f"Added permission rule `{rule}`.", timestamp=now
+                )
+            elif parts[0].lower() == "reset":
+                self.permission_manager.user_rules.clear()
+                self.permission_manager.reset_session_rules()
+                self.settings.save_permission_rules([])
+                self.write_message(
+                    "assistant", "Permission rules reset to defaults.", timestamp=now
+                )
+            else:
+                self.write_message(
+                    "assistant",
+                    "Unknown subcommand. Try `/permissions status`, `mode`, `allow`, `deny`, or `reset`.",
+                    timestamp=now,
+                )
+        elif name == "compact":
+            self.show_chat()
+            await asyncio.sleep(0)
+            now = datetime.now().strftime("%I:%M %p")
+            compactor = Compactor(
+                self.client,
+                context_limit=self.settings.context_limit,
+                threshold=self.settings.compact_threshold,
+                keep_tokens=self.settings.compact_keep_tokens,
+            )
+            try:
+                result = await compactor.compact(
+                    self.store.context_messages(self.session_id),
+                    reason="manual",
+                    instructions=args.strip(),
+                )
+            except Exception as exc:  # noqa: BLE001
+                self.write_message("assistant", f"Compaction failed: `{exc}`", timestamp=now)
+                return
+            if result is None:
+                self.write_message(
+                    "assistant", "Nothing to compact yet.", timestamp=now
+                )
+                return
+            self.store.add_message(
+                self.session_id,
+                "system",
+                "<conversation-checkpoint>\n"
+                + result.summary
+                + "\n</conversation-checkpoint>",
+                metadata={"kind": "checkpoint", "reason": "manual"},
+            )
+            self.store.set_summary(self.session_id, result.summary)
+            self.write_message(
+                "assistant",
+                f"### Context compacted\n\nRemoved {result.removed} messages "
+                f"({result.before_tokens} → {result.after_tokens} tokens).\n\n"
+                + result.summary,
+                timestamp=now,
+            )
+        elif name == "mcp":
+            self.show_chat()
+            await asyncio.sleep(0)
+            now = datetime.now().strftime("%I:%M %p")
+            if self.mcp is None:
+                self.write_message(
+                    "assistant", "MCP is disabled in settings.", timestamp=now
+                )
+                return
+            sub = args.strip().lower()
+            if sub in ("start", "reload"):
+                if sub == "reload":
+                    await self.mcp.stop()
+                    self._mcp_started = False
+                await self.mcp.start()
+                self._mcp_started = True
+            elif sub == "stop":
+                await self.mcp.stop()
+                self._mcp_started = False
+            self.write_message(
+                "assistant",
+                self.mcp.status()
+                + f"\n\nConfig: `{self.settings.mcp_config}`\n"
+                "Subcommands: `/mcp status|start|reload|stop`",
+                timestamp=now,
+            )
+        elif name == "skills":
+            self.show_chat()
+            await asyncio.sleep(0)
+            now = datetime.now().strftime("%I:%M %p")
+            if self.skills is None:
+                self.write_message(
+                    "assistant", "Skills are disabled in settings.", timestamp=now
+                )
+                return
+            if args.strip().lower() == "reload":
+                self.skills.reload()
+            self.write_message(
+                "assistant",
+                self.skills.summary() or "No skills installed.",
+                timestamp=now,
+            )
+        elif name == "lsp":
+            self.show_chat()
+            await asyncio.sleep(0)
+            now = datetime.now().strftime("%I:%M %p")
+            if self.lsp is None:
+                self.write_message(
+                    "assistant", "LSP is disabled in settings.", timestamp=now
+                )
+                return
+            if args.strip().lower() == "stop":
+                await self.lsp.stop()
+            self.write_message("assistant", self.lsp.status(), timestamp=now)
+        elif name == "provider":
+            self.show_chat()
+            await asyncio.sleep(0)
+            now = datetime.now().strftime("%I:%M %p")
+            sub = args.strip().lower()
+            if sub in ("auto", "native", "prompt"):
+                self.settings.save_provider(sub)
+                self.last_provider = sub
+                self.write_message(
+                    "assistant",
+                    f"Provider mode set to **{sub}**.\n"
+                    "- `native`: OpenAI-compatible tool calling\n"
+                    "- `prompt`: XML tool calls through `/completion`\n"
+                    "- `auto`: try native, fall back automatically",
+                    timestamp=now,
+                )
+            else:
+                self.write_message(
+                    "assistant",
+                    f"Provider mode: **{self.settings.provider}**\n"
+                    "Use `/provider auto|native|prompt`.",
+                    timestamp=now,
+                )
+            self.update_status_bar()
+        elif name == "context":
+            self.show_chat()
+            await asyncio.sleep(0)
+            now = datetime.now().strftime("%I:%M %p")
+            if args.strip():
+                try:
+                    self.settings.save_context_limit(int(args.strip()))
+                except ValueError:
+                    self.write_message(
+                        "assistant", "Usage: `/context <token limit>`", timestamp=now
+                    )
+                    return
+                self.context_max = self.settings.context_limit
+            self.write_message(
+                "assistant",
+                f"Context limit: **{self.settings.context_limit}** tokens\n"
+                f"Compact threshold: **{self.settings.compact_threshold:.0%}**\n"
+                f"Keep recent: **{self.settings.compact_keep_tokens}** tokens",
+                timestamp=now,
+            )
+            self.update_status_bar()
+        elif name == "init":
+            self.show_chat()
+            await asyncio.sleep(0)
+            now = datetime.now().strftime("%I:%M %p")
+            from pathlib import Path
+
+            target = Path(self.settings.workspace_dir).resolve() / "AGENTS.md"
+            if target.exists():
+                self.write_message(
+                    "assistant",
+                    f"`AGENTS.md` already exists at `{target}`.",
+                    timestamp=now,
+                )
+                return
+            target.write_text(
+                "# Project Instructions\n\n"
+                "## Overview\n"
+                "Describe the project and its purpose.\n\n"
+                "## Commands\n"
+                "- Build: `...`\n"
+                "- Test: `...`\n"
+                "- Lint: `...`\n\n"
+                "## Conventions\n"
+                "- Language and style\n"
+                "- Testing expectations\n"
+                "- Files that must not be edited directly\n",
+                encoding="utf-8",
+            )
+            self.write_message(
+                "assistant",
+                f"Created `{target}`. Edit it to describe this project's conventions.",
+                timestamp=now,
+            )
         elif name == "mode":
             self.show_chat()
             await asyncio.sleep(0)
@@ -2195,7 +2737,10 @@ class GemmaTUI(App):
                     f"- **Agent Mode**: **{'ACTIVE (🤖 AGENT)' if self.settings.agent_mode else 'INACTIVE (💬 CHAT)'}**\n"
                     f"- **Workspace Directory**: `{ws}` ({'exists' if exists else 'not found'})\n"
                     f"- **Max Autonomous Steps**: `{self.settings.agent_max_steps}`\n"
-                    f"- **Tools Available**: `read_file`, `write_file`, `edit_file`, `list_dir`, `grep_search`, `run_command`\n"
+                    f"- **Tools Available**: `read`, `write`, `edit`, `glob`, `grep`, `bash`, `patch`, `git_*`, `lsp_*`, `skill`, MCP tools\n"
+                    f"- **Provider**: `{self.settings.provider}` (last: `{self.last_provider}`)\n"
+                    f"- **Permissions**: `{self.settings.permission_mode}`\n"
+                    f"- **Context Limit**: `{self.settings.context_limit}` tokens\n"
                     f"- **Active Model**: `{self.settings.model}`\n\n"
                     f"*Subcommands:*\n"
                     f"- `/agent on` / `/agent off`\n"
@@ -2302,11 +2847,36 @@ class GemmaTUI(App):
 
     # ── Status Bar ──────────────────────────────────────────────────────
 
-    def update_status_bar(self) -> None:
+    def _model_label(self, limit: int = 24) -> str:
+        """Shorten long model ids so the header stays one line."""
+        name = str(self.settings.model or "").strip()
+        if len(name) <= limit:
+            return name
+        if limit <= 1:
+            return "…"
+        return name[: limit - 1] + "…"
+
+    def _update_model_label(self) -> None:
+        """Fit the model name to the space the top bar actually gives it."""
         try:
-            self.query_one("#topbar-model", Static).update(f"Model: {self.settings.model} ˅")
+            slot = self.query_one("#topbar-model", Static).content_size.width
+        except Exception:
+            slot = 0
+        if slot <= 0:
+            slot = 24
+        if slot >= 22:
+            text = f"Model: {self._model_label(max(6, slot - 9))} ˅"
+        elif slot >= 5:
+            text = self._model_label(slot)
+        else:
+            text = "…"
+        try:
+            self.query_one("#topbar-model", Static).update(text)
         except Exception:
             pass
+
+    def update_status_bar(self) -> None:
+        self._update_model_label()
 
         now = datetime.now().strftime("%I:%M:%S %p")
         try:
@@ -2314,17 +2884,36 @@ class GemmaTUI(App):
         except Exception:
             pass
 
-        tok_s = f"{self.total_tokens / max(self.gen_time, 0.01):.1f}" if self.gen_time > 0 else "0.0"
-        status_bar = (
-            f"tok/s: {tok_s}  │  gen: {self.total_gen_count}  │  "
-            f"time: {self.gen_time:.1f}s  │  temp: {self.settings.temperature}  │  "
-            f"context: {self.context_used}/{self.context_max}  │  "
-            f"theme: {self.active_theme.name}"
-        )
+        if self.last_gen_tokens > 0 and self.gen_time_active > 0:
+            tok_s = f"{self.last_gen_tokens / max(self.gen_time_active, 0.01):.1f}"
+        else:
+            tok_s = "0.0"
+        parts = [
+            f"context: {self.context_used}/{self.context_max}",
+            f"tok/s: {tok_s}",
+            f"time: {self.gen_time:.1f}s",
+            f"provider: {self.last_provider}",
+            f"perm: {self.settings.permission_mode}",
+            f"gen: {self.total_gen_count}",
+            f"temp: {self.settings.temperature}",
+            f"theme: {self.active_theme.name}",
+        ]
+        status_bar = "  │  ".join(parts)
+        # Drop trailing (least important) stats rather than let the line clip.
+        try:
+            avail = self.query_one("#statusbar", Static).content_size.width
+        except Exception:
+            avail = 0
+        if avail <= 0:
+            avail = max(20, self.size.width - 2)
+        while len(parts) > 2 and len(status_bar) > avail:
+            parts.pop()
+            status_bar = "  │  ".join(parts)
         try:
             self.query_one("#statusbar", Static).update(status_bar)
         except Exception:
             pass
+
 
     # ── View Switching ──────────────────────────────────────────────────
 
@@ -2333,12 +2922,14 @@ class GemmaTUI(App):
         self.query_one("#landing", Container).remove_class("hidden")
         self.query_one("#chat-area", Vertical).add_class("hidden")
         self.query_one("#prompt", Input).focus()
+        self._apply_footer_layout(self.size.width)
 
     def show_chat(self) -> None:
         self._hide_autocomplete()
         self.query_one("#landing", Container).add_class("hidden")
         self.query_one("#chat-area", Vertical).remove_class("hidden")
         self.query_one("#chat-prompt", ChatInput).focus()
+        self._apply_footer_layout(self.size.width)
 
     # ── Actions ─────────────────────────────────────────────────────────
 
@@ -2487,6 +3078,8 @@ class GemmaTUI(App):
         self.total_tokens = 0
         self.total_gen_count = 0
         self.gen_time = 0.0
+        self.last_gen_tokens = 0
+        self.gen_time_active = 0.0
         self.context_used = 0
         self.update_status_bar()
 
@@ -2557,7 +3150,7 @@ class GemmaTUI(App):
                 self.query_one("#sessions", ListView).focus()
                 return
             if wid == "nav-settings":
-                asyncio.create_task(self.run_command("config", ""))
+                self.action_settings_menu()
                 return
             if wid == "nav-toggle" or "nav-toggle-btn" in classes:
                 self.toggle_sidebar()
@@ -2575,7 +3168,7 @@ class GemmaTUI(App):
                 self.action_command_palette()
                 return
             if wid in ("topbar-model", "cmd-model") or "cmd-model" in classes:
-                self._populate_command_input("/model ")
+                self.action_model_picker()
                 return
             if wid == "cmd-theme" or "cmd-theme" in classes:
                 self.action_theme_picker()

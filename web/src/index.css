@@ -1,0 +1,135 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --accent: 34 211 238;
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  @apply bg-bg font-sans text-text antialiased;
+  background-image: radial-gradient(
+    1200px 600px at 70% -10%,
+    rgb(var(--accent) / 0.05),
+    transparent 60%
+  );
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #333 transparent;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #333;
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::selection {
+  background: rgb(var(--accent) / 0.25);
+}
+
+@layer components {
+  .card {
+    @apply rounded-xl border border-line bg-card shadow-card;
+  }
+
+  .panel {
+    @apply rounded-xl border border-line bg-panel;
+  }
+
+  .icon-btn {
+    @apply inline-flex h-8 w-8 items-center justify-center rounded-lg text-dim transition-colors hover:bg-white/5 hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60;
+  }
+
+  .pill {
+    @apply inline-flex items-center gap-1.5 rounded-full border border-line px-2.5 py-1 text-[11px] font-medium tracking-wide;
+  }
+
+  .kbd {
+    @apply rounded-md border border-line bg-white/[0.03] px-1.5 py-0.5 font-mono text-[10px] text-dim;
+  }
+
+  .field {
+    @apply w-full resize-none bg-transparent text-[15px] leading-6 text-text outline-none placeholder:text-muted;
+  }
+}
+
+.prose-gemma {
+  @apply text-[15px] leading-7 text-text;
+}
+
+.prose-gemma > * + * {
+  @apply mt-3;
+}
+
+.prose-gemma h1,
+.prose-gemma h2,
+.prose-gemma h3 {
+  @apply font-semibold text-text;
+}
+
+.prose-gemma h1 {
+  @apply text-xl;
+}
+
+.prose-gemma h2 {
+  @apply text-lg;
+}
+
+.prose-gemma h3 {
+  @apply text-base;
+}
+
+.prose-gemma a {
+  @apply text-accent underline decoration-accent/40 underline-offset-2 hover:decoration-accent;
+}
+
+.prose-gemma ul {
+  @apply list-disc space-y-1 pl-5 marker:text-muted;
+}
+
+.prose-gemma ol {
+  @apply list-decimal space-y-1 pl-5 marker:text-muted;
+}
+
+.prose-gemma blockquote {
+  @apply border-l-2 border-line pl-4 text-dim;
+}
+
+.prose-gemma hr {
+  @apply border-line;
+}
+
+.prose-gemma table {
+  @apply w-full border-collapse text-sm;
+}
+
+.prose-gemma th,
+.prose-gemma td {
+  @apply border border-line px-3 py-1.5 text-left;
+}
+
+.prose-gemma th {
+  @apply bg-white/[0.03] font-semibold;
+}
+
+.prose-gemma strong {
+  @apply font-semibold text-white;
+}
