@@ -444,3 +444,43 @@ def test_service_status_and_actions(web) -> None:
         assert client.post("/api/mcp", json={"action": "explode"}).status_code == 400
         assert client.post("/api/lsp", json={"action": "stop"}).status_code == 200
         assert client.post("/api/skills", json={"action": "reload"}).status_code == 200
+
+
+def test_research_endpoints(web, monkeypatch: pytest.MonkeyPatch) -> None:
+    server, base, _store = web
+    with _paired_client(base, server) as client:
+        # Smalltalk never triggers the search pipeline.
+        small = client.post("/api/research/prepare", json={"message": "hi there!"})
+        assert small.status_code == 200
+        assert small.json()["search"] is False
+
+        async def fake_decide(question, llm):  # type: ignore[no-untyped-def]
+            return True, ["latest gemma news", question]
+
+        async def fake_context(query, **kwargs):  # type: ignore[no-untyped-def]
+            return f"WEB CONTEXT for {query}"
+
+        monkeypatch.setattr("core.orchestrator.decide_search", fake_decide)
+        monkeypatch.setattr("core.research.search_context", fake_context)
+
+        prep = client.post(
+            "/api/research/prepare", json={"message": "what is the latest gemma news?"}
+        )
+        assert prep.status_code == 200
+        data = prep.json()
+        assert data["search"] is True
+        assert data["query"] == "latest gemma news"
+        assert data["context"] == "WEB CONTEXT for latest gemma news"
+
+        # Nothing found → search stays true with empty context.
+        async def empty_context(query, **kwargs):  # type: ignore[no-untyped-def]
+            return ""
+
+        monkeypatch.setattr("core.research.search_context", empty_context)
+        empty = client.post("/api/research/prepare", json={"message": "breaking news now"})
+        assert empty.json() == {"search": True, "query": "latest gemma news", "context": ""}
+
+        # Web context rides into the chat messages after the system prompt.
+        messages = server.build_messages("any", "CTX")
+        assert messages[1] == {"role": "system", "content": "CTX"}
+        assert len(server.build_messages("any")) == 1  # no context → no extra message

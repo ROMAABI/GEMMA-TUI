@@ -25,9 +25,6 @@ type Overlay =
   | { kind: "help" }
   | { kind: "rename"; initial: string }
 
-/** Commands that still belong to the Textual TUI. */
-const CLASSIC_ONLY = new Set(["/websearch"])
-
 export function App(props: { chat: Chat }) {
   const renderer = useRenderer()
   const dims = useTerminalDimensions()
@@ -563,12 +560,64 @@ export function App(props: { chat: Chat }) {
         quit()
         return true
       default:
-        flash(
-          CLASSIC_ONLY.has(name)
-            ? `${name} lives in the classic TUI: gemma --classic`
-            : `Unknown command ${name} — try /help`,
-        )
+        flash(`Unknown command ${name} — try /help`)
         return true
+      case "/websearch": {
+        const [first, ...rest] = arg.split(/\s+/).filter(Boolean)
+        const value = rest.join(" ")
+        if (!first || first === "status") {
+          void (async () => {
+            const state = await props.chat.client.researchStatus()
+            flash(
+              `Web search ${props.chat.websearch() ? "ON" : "OFF"} · ${state.healthy ? "🟢" : "🔴"} ${state.detail} · ${state.url} · deep read ${state.deep_read ? "on" : "off"}`,
+            )
+          })()
+          return true
+        }
+        if (first === "on" || first === "true" || first === "1") {
+          props.chat.setWebsearch(true)
+          flash("Web search: ON")
+          return true
+        }
+        if (first === "off" || first === "false" || first === "0") {
+          props.chat.setWebsearch(false)
+          flash("Web search: OFF")
+          return true
+        }
+        if (first === "url") {
+          if (!value) {
+            flash("Usage: /websearch url <http://host:port>")
+            return true
+          }
+          void (async () => {
+            const result = await props.chat.client.researchConfig(value)
+            flash(`SearXNG URL: ${result.url} · ${result.healthy ? "🟢" : "🟡"} ${result.detail}`)
+          })()
+          return true
+        }
+        if (first === "test") {
+          const query = value || "PyTorch latest version"
+          flash(`✦ Running test search for: ${query}…`)
+          void (async () => {
+            const result = await props.chat.client.researchTest(query)
+            if (result.ok && result.results.length) {
+              flash(
+                result.results
+                  .map(
+                    (item, index) =>
+                      `${index + 1}. ${item.title ?? item.url ?? "?"}${item.engine ? ` [${item.engine}]` : ""}`,
+                  )
+                  .join(" · "),
+              )
+            } else {
+              flash(`No results for ${query}${result.error ? ` (${result.error})` : ""}`)
+            }
+          })()
+          return true
+        }
+        flash("Usage: /websearch [on|off|status|test <query>|url <http://host:port>]")
+        return true
+      }
     }
   }
 

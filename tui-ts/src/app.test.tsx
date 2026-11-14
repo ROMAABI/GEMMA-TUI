@@ -79,7 +79,7 @@ function sseResponse(events: string[]): Response {
 
 interface MockServer {
   base: string
-  chatRequests: Array<{ session_id: string; message: string }>
+  chatRequests: Array<{ session_id: string; message: string; context?: string }>
   agentRequests: Array<{ session_id: string; message: string }>
   modeRequests: string[]
   providerModes: string[]
@@ -93,7 +93,7 @@ function startMock(
   replyTokens = ["Hello", " from", " the", " mock"],
   options: { mode?: "chat" | "agent" } = {},
 ): MockServer {
-  const chatRequests: Array<{ session_id: string; message: string }> = []
+  const chatRequests: Array<{ session_id: string; message: string; context?: string }> = []
   const agentRequests: Array<{ session_id: string; message: string }> = []
   const modeRequests: string[] = []
   const encoder = new TextEncoder()
@@ -227,6 +227,42 @@ function startMock(
           action: body.action,
           status: `${service} ${body.action} ok`,
         })
+      }
+      if (path === "/api/research/status") {
+        return Response.json({
+          healthy: false,
+          detail: "connection refused",
+          url: "http://localhost:8888",
+          deep_read: true,
+        })
+      }
+      if (path === "/api/research/prepare" && request.method === "POST") {
+        const body = (await request.json()) as { message: string }
+        if (/^(hi|hey|hello)\b/i.test(body.message)) {
+          return Response.json({ search: false, reason: "smalltalk" })
+        }
+        if (/latest|breaking/i.test(body.message)) {
+          return Response.json({
+            search: true,
+            query: "gemma latest news",
+            context: "WEB CONTEXT",
+          })
+        }
+        return Response.json({ search: false })
+      }
+      if (path === "/api/research/test" && request.method === "POST") {
+        const body = (await request.json()) as { query: string }
+        return Response.json({
+          ok: true,
+          query: body.query,
+          results: [
+            { title: "Gemma release notes", url: "https://example.com/gemma", engine: "duckduckgo" },
+          ],
+        })
+      }
+      if (path === "/api/research/config" && request.method === "POST") {
+        const body = (await request.json()) as { url: string }
+        return Response.json({ ok: true, url: body.url, healthy: false, detail: "connection refused" })
       }
 
       if (path === "/api/chat" && request.method === "POST") {
@@ -615,6 +651,43 @@ describe("OpenTUI client", () => {
     setup.mockInput.typeText("/mcp explode")
     setup.mockInput.pressEnter()
     await setup.waitForFrame((text: string) => text.includes("Usage: /mcp"))
+  })
+
+  test("/websearch toggles, checks status and injects context", async () => {
+    current = startMock()
+    const { setup } = await mount(current)
+    setupRef = setup
+
+    setup.mockInput.typeText("/websearch status")
+    setup.mockInput.pressEnter()
+    await setup.waitForFrame((text: string) => text.includes("Web search OFF"))
+    expect(current.chatRequests.every((r) => !r.context)).toBe(true)
+
+    setup.mockInput.typeText("/websearch on")
+    setup.mockInput.pressEnter()
+    await setup.waitForFrame((text: string) => text.includes("Web search: ON"))
+
+    setup.mockInput.typeText("latest gemma news")
+    setup.mockInput.pressEnter()
+    await setup.waitForFrame((text: string) => text.includes("Hello from the mock"))
+    expect(current.chatRequests[0]?.context).toBe("WEB CONTEXT")
+
+    setup.mockInput.typeText("/websearch off")
+    setup.mockInput.pressEnter()
+    await setup.waitForFrame((text: string) => text.includes("Web search: OFF"))
+
+    setup.mockInput.typeText("hello again")
+    setup.mockInput.pressEnter()
+    await setup.waitForFrame((text: string) => text.includes("Hello from the mock"))
+    expect(current.chatRequests[1]?.context).toBeUndefined()
+
+    setup.mockInput.typeText("/websearch test")
+    setup.mockInput.pressEnter()
+    await setup.waitForFrame((text: string) => text.includes("Gemma release notes"))
+
+    setup.mockInput.typeText("/websearch url http://127.0.0.1:9999")
+    setup.mockInput.pressEnter()
+    await setup.waitForFrame((text: string) => text.includes("SearXNG URL: http://127.0.0.1:9999"))
   })
 
   test("Tab switches chat and agent mode", async () => {

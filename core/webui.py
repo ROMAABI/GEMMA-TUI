@@ -15,6 +15,7 @@ import asyncio
 import json
 import mimetypes
 import queue
+import re
 import secrets
 import threading
 import time
@@ -61,6 +62,15 @@ def _system_prompt() -> str:
         return SYSTEM_PROMPT
     except Exception:  # noqa: BLE001 - the server must work without the TUI
         return "You are Gemma, a helpful local AI assistant."
+
+
+_SMALLTALK_RE = re.compile(
+    r"^(hi|hey|hello|yo|sup|hiya)(\s+(gemma|there|bot|assistant|friend))?[\s!.,?]*$"
+    r"|^(thanks|thank you|thx|ok|okay|"
+    r"good (morning|afternoon|evening|night)|how are you|how's it going|"
+    r"what'?s up|bye|goodbye)[\s!.,?]*$",
+    re.IGNORECASE,
+)
 
 
 class _Server(ThreadingHTTPServer):
@@ -172,21 +182,25 @@ class GemmaWebServer:
         return True
 
     # ── chat ────────────────────────────────────────────────────────────
-    def build_messages(self, session_id: str) -> list[dict[str, str]]:
+    def build_messages(self, session_id: str, context: str = "") -> list[dict[str, str]]:
         history = [
             {"role": str(item.get("role")), "content": str(item.get("content") or "")}
             for item in self.store.messages(session_id)
         ]
-        return [{"role": "system", "content": _system_prompt()}] + history
+        messages = [{"role": "system", "content": _system_prompt()}] + history
+        if context.strip():
+            # Web research context rides in as a system message, like the TUI did.
+            messages.insert(1, {"role": "system", "content": context})
+        return messages
 
-    async def _pump_chat(self, handler: "_Handler", session_id: str) -> None:
+    async def _pump_chat(self, handler: "_Handler", session_id: str, context: str = "") -> None:
         client = LlamaClient(self.settings)
         started = time.monotonic()
         first_at: float | None = None
         text = ""
         tokens = 0
         try:
-            async for chunk in client.stream_chat(self.build_messages(session_id)):
+            async for chunk in client.stream_chat(self.build_messages(session_id, context)):
                 if not chunk:
                     continue
                 if first_at is None:
@@ -329,6 +343,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._json({"enabled": self.gemma.settings.skills_enabled, "summary": self.gemma.agent.service_status("skills")})
         elif path == "/api/lsp/status":
             self._json({"enabled": self.gemma.settings.lsp_enabled, "status": self.gemma.agent.service_status("lsp")})
+        elif path == "/api/research/status":
+            self._research_status()
         elif path.startswith("/api/sessions/"):
             session_id = unquote(path.split("/", 3)[3]).split("/")[0]
             self._session_detail(session_id)
@@ -360,6 +376,12 @@ class _Handler(BaseHTTPRequestHandler):
             self._agent_settings()
         elif path in ("/api/mcp", "/api/skills", "/api/lsp"):
             self._service_action(path.split("/")[-1])
+        elif path == "/api/research/prepare":
+            self._research_prepare()
+        elif path == "/api/research/test":
+            self._research_test()
+        elif path == "/api/research/config":
+            self._research_config()
         elif path == "/api/agent":
             self._agent()
         elif path == "/api/agent/abort":
@@ -713,6 +735,108 @@ class _Handler(BaseHTTPRequestHandler):
             return
         self._json({"ok": True, "service": service, "action": action, "status": status})
 
+    # ── web research (SearXNG) ──────────────────────────────────────────
+
+    def _research_prepare(self) -> None:
+        try:
+            body = self._read_json()
+        except (ValueError, json.JSONDecodeError):
+            self._json({"error": "invalid json"}, 400)
+            return
+        message = str(body.get("message") or "").strip()
+        if not message:
+            self._json({"error": "message required"}, 400)
+            return
+        if _SMALLTALK_RE.match(message):
+            self._json({"search": False, "reason": "smalltalk"})
+            return
+
+        async def run() -> dict[str, Any]:
+            from core.orchestrator import decide_search
+            from core.research import search_context
+
+            settings = self.gemma.settings
+            client = LlamaClient(settings)
+            needs, queries = await decide_search(message, client)
+            if not needs:
+                return {"search": False}
+            started = time.monotonic()
+            for query in queries:
+                try:
+                    context = await search_context(
+                        query,
+                        searxng_url=settings.searxng_url,
+                        deep_read=settings.searxng_deep_read,
+                    )
+                except Exception:  # noqa: BLE001 - fall through to the next query
+                    context = ""
+                if context:
+                    return {
+                        "search": True,
+                        "query": query,
+                        "context": context,
+                        "elapsed": round(time.monotonic() - started, 3),
+                    }
+            return {"search": True, "query": queries[0] if queries else "", "context": ""}
+
+        self._json(asyncio.run(run()))
+
+    def _research_status(self) -> None:
+        from core.research import check_searxng_health
+
+        settings = self.gemma.settings
+        healthy, detail = asyncio.run(check_searxng_health(settings.searxng_url))
+        self._json(
+            {
+                "healthy": healthy,
+                "detail": detail,
+                "url": settings.searxng_url,
+                "deep_read": settings.searxng_deep_read,
+            }
+        )
+
+    def _research_test(self) -> None:
+        try:
+            body = self._read_json()
+        except (ValueError, json.JSONDecodeError):
+            self._json({"error": "invalid json"}, 400)
+            return
+        query = str(body.get("query") or "").strip() or "PyTorch latest version"
+        from core.research import web_search
+
+        try:
+            results = asyncio.run(
+                web_search(query, top_n=3, searxng_url=self.gemma.settings.searxng_url)
+            )
+        except Exception as exc:  # noqa: BLE001 - report engine failures
+            self._json({"ok": False, "query": query, "error": str(exc), "results": []})
+            return
+        self._json({"ok": bool(results), "query": query, "results": results[:3]})
+
+    def _research_config(self) -> None:
+        try:
+            body = self._read_json()
+        except (ValueError, json.JSONDecodeError):
+            self._json({"error": "invalid json"}, 400)
+            return
+        url = str(body.get("url") or "").strip()
+        if not url:
+            self._json({"error": "url required"}, 400)
+            return
+        from core.research import check_searxng_health
+
+        settings = self.gemma.settings
+        settings.save_searxng_url(url)
+        healthy, detail = asyncio.run(check_searxng_health(settings.searxng_url))
+        self._json(
+            {
+                "ok": True,
+                "url": settings.searxng_url,
+                "healthy": healthy,
+                "detail": detail,
+            }
+        )
+
     def _commands(self) -> list[dict[str, str]]:
         try:
             from core.commands import COMMAND_DEFS
@@ -773,6 +897,7 @@ class _Handler(BaseHTTPRequestHandler):
         if not session_id or self.gemma.store.get_session(session_id) is None:
             session_id = self.gemma.store.create_session()
         self.gemma.store.add_message(session_id, "user", message)
+        context = str(body.get("context") or "").strip()
 
         # The stream has no Content-Length, so the response ends when the
         # connection closes: keep-alive would leave the browser waiting.
@@ -785,7 +910,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.emit({"type": "start", "session_id": session_id})
         try:
-            asyncio.run(self.gemma._pump_chat(self, session_id))
+            asyncio.run(self.gemma._pump_chat(self, session_id, context))
         except (BrokenPipeError, ConnectionResetError):
             pass
 

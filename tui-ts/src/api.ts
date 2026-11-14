@@ -80,6 +80,35 @@ export interface PermissionConfig {
   rules: string[]
 }
 
+export interface ResearchPrepare {
+  search: boolean
+  reason?: string
+  query?: string
+  context?: string
+  elapsed?: number
+}
+
+export interface ResearchStatus {
+  healthy: boolean
+  detail: string
+  url: string
+  deep_read: boolean
+}
+
+export interface ResearchResult {
+  title?: string
+  url?: string
+  engine?: string
+  snippet?: string
+}
+
+export interface ResearchTest {
+  ok: boolean
+  query: string
+  error?: string
+  results: ResearchResult[]
+}
+
 export interface DoneStats {
   elapsed: number
   ttft: number
@@ -312,6 +341,29 @@ export class GemmaClient {
     return this.json(`/api/${service}`, { method: "POST", body: JSON.stringify({ action }) })
   }
 
+  /** Judge + SearXNG pipeline for one user message (server-side). */
+  researchPrepare(message: string): Promise<ResearchPrepare> {
+    return this.json("/api/research/prepare", {
+      method: "POST",
+      body: JSON.stringify({ message }),
+    })
+  }
+
+  /** SearXNG connectivity snapshot. */
+  researchStatus(): Promise<ResearchStatus> {
+    return this.json("/api/research/status")
+  }
+
+  /** Run one real search (top 3 results) to verify the engine works. */
+  researchTest(query: string): Promise<ResearchTest> {
+    return this.json("/api/research/test", { method: "POST", body: JSON.stringify({ query }) })
+  }
+
+  /** Point the pipeline at another SearXNG instance. */
+  researchConfig(url: string): Promise<{ ok: boolean; url: string; healthy: boolean; detail: string }> {
+    return this.json("/api/research/config", { method: "POST", body: JSON.stringify({ url }) })
+  }
+
   abortRun(runId: string): Promise<unknown> {
     return this.json("/api/agent/abort", { method: "POST", body: JSON.stringify({ run_id: runId }) })
   }
@@ -326,11 +378,14 @@ export class GemmaClient {
       onDone?: (stats: DoneStats) => void
     },
     signal?: AbortSignal,
+    context?: string,
   ): Promise<void> {
     const response = await fetch(`${this.base}/api/chat`, {
       method: "POST",
       headers: this.headers({ Accept: "text/event-stream" }),
-      body: JSON.stringify({ session_id: sessionId, message }),
+      body: JSON.stringify(
+        context ? { session_id: sessionId, message, context } : { session_id: sessionId, message },
+      ),
       signal,
     })
     if (response.status === 401) throw new PairingError("Pairing required.")

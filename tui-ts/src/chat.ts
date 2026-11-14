@@ -154,6 +154,7 @@ export function createChat(client: GemmaClient) {
   const [providers, setProviders] = createSignal<ProviderCatalog | null>(null)
   const [commands, setCommands] = createSignal<CommandDef[]>([])
   const [notice, setNoticeSignal] = createSignal<string | null>(null)
+  const [websearch, setWebsearchSignal] = createSignal(false)
   const [permission, setPermission] = createSignal<AgentEvent | null>(null)
   const [runId, setRunId] = createSignal<string | null>(null)
   const [live, setLive] = createSignal<{ tokens: number; elapsed: number; ttft: number }>({
@@ -171,6 +172,15 @@ export function createChat(client: GemmaClient) {
     setNoticeSignal(text)
     if (noticeTimer) clearTimeout(noticeTimer)
     if (text) noticeTimer = setTimeout(() => setNoticeSignal(null), 6000)
+  }
+
+  function setWebsearch(next: boolean): void {
+    setWebsearchSignal(next)
+    setNotice(`Web search: ${next ? "ON" : "OFF"}`)
+  }
+
+  function toggleWebsearch(): void {
+    setWebsearch(!websearch())
   }
 
   const activeSession = createMemo<Session | undefined>(
@@ -573,11 +583,28 @@ export function createChat(client: GemmaClient) {
     let content = ""
     const statsBox: { value: DoneStats | null } = { value: null }
 
+    // Optional web research: the server judges the question and fetches
+    // SearXNG context, which rides into /api/chat as a system message.
+    let context: string | undefined
+    if (websearch()) {
+      setNotice("✦ Searching the web…")
+      try {
+        const prep = await client.researchPrepare(raw.trim())
+        if (prep.search && prep.context) context = prep.context
+        if (prep.search && !prep.context) setNotice("No web results — answering from the model")
+      } catch (error) {
+        setNotice(error instanceof Error ? error.message : String(error))
+      }
+    }
+
     try {
       await client.streamChat(
         sessionId,
         raw.trim(),
         {
+          onStart: () => {
+            if (context) setNotice(null)
+          },
           onToken: (token) => {
             if (firstAt === null) firstAt = performance.now()
             content += token
@@ -595,6 +622,7 @@ export function createChat(client: GemmaClient) {
           },
         },
         controller?.signal,
+        context,
       )
 
       const finalStats = statsBox.value
@@ -861,6 +889,9 @@ export function createChat(client: GemmaClient) {
     permissionConfig,
     setAgentSettings,
     serviceStatus,
+    websearch,
+    setWebsearch,
+    toggleWebsearch,
     send,
     stop,
     respondPermission,
