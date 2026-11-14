@@ -82,6 +82,10 @@ interface MockServer {
   chatRequests: Array<{ session_id: string; message: string }>
   agentRequests: Array<{ session_id: string; message: string }>
   modeRequests: string[]
+  providerModes: string[]
+  contextLimits: number[]
+  agentSettings: Array<{ workspace?: string; max_steps?: number }>
+  permissionConfig: { mode: string; rules: string[] }
   stop: () => void
 }
 
@@ -104,7 +108,14 @@ function startMock(
     provider: "llama.cpp",
     temperature: 0.7,
     context_max: 8192,
+    max_steps: 10,
+    permission_mode: "auto",
+    provider_mode: "auto",
   }
+  const permissionConfig = { mode: "auto", rules: [] as string[] }
+  const providerModes: string[] = []
+  const contextLimits: number[] = []
+  const agentSettings: Array<{ workspace?: string; max_steps?: number }> = []
 
   const server = Bun.serve({
     port: 0,
@@ -133,6 +144,60 @@ function startMock(
       }
       if (path === "/api/commands") return Response.json(COMMANDS)
       if (path === "/api/pair") return Response.json({ pair: "http://127.0.0.1/pair?token=abc" })
+      if (path === "/api/permissions/config" && request.method === "GET") {
+        return Response.json(permissionConfig)
+      }
+      if (path === "/api/permissions/config" && request.method === "POST") {
+        const body = (await request.json()) as {
+          mode?: string
+          add?: string
+          effect?: "allow" | "deny" | "ask"
+          action?: string
+          resource?: string
+          reset?: boolean
+        }
+        if (body.reset) {
+          permissionConfig.rules = []
+        } else if (body.mode) {
+          if (!["auto", "ask", "readonly"].includes(body.mode)) {
+            return Response.json({ error: "invalid mode" }, { status: 400 })
+          }
+          permissionConfig.mode = body.mode
+          info.permission_mode = body.mode
+        } else if (body.add) {
+          if (!body.effect) return Response.json({ error: "invalid effect" }, { status: 400 })
+          permissionConfig.rules.push(
+            `${body.action ?? "*"}:${body.resource ?? "*"}:${body.effect}`,
+          )
+        }
+        return Response.json({ mode: permissionConfig.mode, rules: [...permissionConfig.rules] })
+      }
+      if (path === "/api/provider_mode" && request.method === "POST") {
+        const body = (await request.json()) as { mode: string }
+        if (!["auto", "native", "prompt"].includes(body.mode)) {
+          return Response.json({ error: "invalid mode" }, { status: 400 })
+        }
+        providerModes.push(body.mode)
+        info.provider_mode = body.mode
+        return Response.json({ ok: true, provider_mode: body.mode })
+      }
+      if (path === "/api/context" && request.method === "POST") {
+        const body = (await request.json()) as { limit: number }
+        if (typeof body.limit !== "number" || Number.isNaN(body.limit)) {
+          return Response.json({ error: "limit must be a number" }, { status: 400 })
+        }
+        const clamped = Math.max(2000, Math.min(body.limit, 1_000_000))
+        contextLimits.push(clamped)
+        info.context_max = clamped
+        return Response.json({ ok: true, context_max: clamped })
+      }
+      if (path === "/api/agent/settings" && request.method === "POST") {
+        const body = (await request.json()) as { workspace?: string; max_steps?: number }
+        agentSettings.push(body)
+        if (body.workspace !== undefined) info.workspace = body.workspace
+        if (body.max_steps !== undefined) info.max_steps = body.max_steps
+        return Response.json({ ok: true, workspace: info.workspace, max_steps: info.max_steps })
+      }
 
       if (path === "/api/chat" && request.method === "POST") {
         const body = (await request.json()) as { session_id: string; message: string }
@@ -214,6 +279,10 @@ function startMock(
     chatRequests,
     agentRequests,
     modeRequests,
+    providerModes,
+    contextLimits,
+    agentSettings,
+    permissionConfig,
     stop: () => server.stop(true),
   }
 }
@@ -403,6 +472,85 @@ describe("OpenTUI client", () => {
     setup.mockInput.pressEnter()
     await setup.waitForFrame((text: string) => text.includes("Sidebar shown"))
     expect(setup.captureCharFrame()).toContain("◆ gemma")
+  })
+
+  test("/provider switches the provider mode", async () => {
+    current = startMock()
+    const { setup } = await mount(current)
+    setupRef = setup
+
+    setup.mockInput.typeText("/provider native")
+    setup.mockInput.pressEnter()
+    await setup.waitForFrame((text: string) => text.includes("Provider mode: native"))
+    expect(current.providerModes).toEqual(["native"])
+
+    setup.mockInput.typeText("/provider")
+    setup.mockInput.pressEnter()
+    await setup.waitForFrame((text: string) => text.includes("Provider mode: native — usage"))
+  })
+
+  test("/context sets and shows the token limit", async () => {
+    current = startMock()
+    const { setup } = await mount(current)
+    setupRef = setup
+
+    setup.mockInput.typeText("/context 16384")
+    setup.mockInput.pressEnter()
+    await setup.waitForFrame((text: string) => text.includes("Context limit: 16,384"))
+    expect(current.contextLimits).toEqual([16384])
+
+    setup.mockInput.typeText("/context")
+    setup.mockInput.pressEnter()
+    await setup.waitForFrame((text: string) => text.includes("Context limit: 16,384 tokens"))
+  })
+
+  test("/permissions reads and writes the policy", async () => {
+    current = startMock()
+    const { setup } = await mount(current)
+    setupRef = setup
+
+    setup.mockInput.typeText("/permissions mode ask")
+    setup.mockInput.pressEnter()
+    await setup.waitForFrame((text: string) => text.includes("Permission mode set to ask"))
+    expect(current.permissionConfig.mode).toBe("ask")
+
+    setup.mockInput.typeText("/permissions allow bash *git push*")
+    setup.mockInput.pressEnter()
+    await setup.waitForFrame((text: string) => text.includes("Added rule bash:*git push*:allow"))
+    expect(current.permissionConfig.rules).toEqual(["bash:*git push*:allow"])
+
+    setup.mockInput.typeText("/permissions status")
+    setup.mockInput.pressEnter()
+    await setup.waitForFrame((text: string) => text.includes("Permission mode: ask · 1 user rules"))
+
+    setup.mockInput.typeText("/permissions reset")
+    setup.mockInput.pressEnter()
+    await setup.waitForFrame((text: string) => text.includes("reset to defaults"))
+    expect(current.permissionConfig.rules).toEqual([])
+  })
+
+  test("/agent configures dir and steps", async () => {
+    current = startMock()
+    const { setup } = await mount(current)
+    setupRef = setup
+
+    setup.mockInput.typeText("/agent steps 20")
+    setup.mockInput.pressEnter()
+    await setup.waitForFrame((text: string) => text.includes("Agent max steps: 20"))
+    expect(current.agentSettings).toEqual([{ max_steps: 20 }])
+
+    setup.mockInput.typeText("/agent dir /tmp/project")
+    setup.mockInput.pressEnter()
+    await setup.waitForFrame((text: string) => text.includes("Agent workspace: /tmp/project"))
+    expect(current.agentSettings[1]).toEqual({ workspace: "/tmp/project" })
+
+    setup.mockInput.typeText("/agent status")
+    setup.mockInput.pressEnter()
+    await setup.waitForFrame((text: string) => text.includes("agent inactive · ws /tmp/project · steps 20"))
+
+    setup.mockInput.typeText("/agent steps 99")
+    setup.mockInput.pressEnter()
+    await setup.waitForFrame((text: string) => text.includes("must be 1..50"))
   })
 
   test("Tab switches chat and agent mode", async () => {

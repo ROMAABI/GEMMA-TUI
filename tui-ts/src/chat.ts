@@ -8,6 +8,7 @@ import {
   type CommandDef,
   type DoneStats,
   type ModelList,
+  type PermissionConfig,
   type ProviderCatalog,
   type ServerInfo,
   type ServerMessage,
@@ -366,6 +367,67 @@ export function createChat(client: GemmaClient) {
 
   function toggleMode(): void {
     void setMode(mode() === "agent" ? "chat" : "agent")
+  }
+
+  async function setProviderMode(next: "auto" | "native" | "prompt"): Promise<void> {
+    try {
+      await client.setProviderMode(next)
+      setInfo((prev) => (prev ? { ...prev, provider_mode: next } : prev))
+      setNotice(`Provider mode: ${next}`)
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  async function setContextLimit(limit: number): Promise<void> {
+    try {
+      const result = await client.setContextLimit(limit)
+      setInfo((prev) => (prev ? { ...prev, context_max: result.context_max } : prev))
+      setNotice(`Context limit: ${result.context_max.toLocaleString()} tokens`)
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  async function updatePermissions(
+    patch: Parameters<GemmaClient["setPermissionConfig"]>[0],
+  ): Promise<PermissionConfig | null> {
+    try {
+      const config = await client.setPermissionConfig(patch)
+      setInfo((prev) => (prev ? { ...prev, permission_mode: config.mode } : prev))
+      return config
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error))
+      return null
+    }
+  }
+
+  async function permissionConfig(): Promise<PermissionConfig | null> {
+    try {
+      return await client.permissionConfig()
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error))
+      return null
+    }
+  }
+
+  async function setAgentSettings(patch: {
+    workspace?: string
+    max_steps?: number
+  }): Promise<void> {
+    try {
+      const result = (await client.setAgentSettings(patch)) as {
+        workspace: string
+        max_steps: number
+      }
+      setInfo((prev) =>
+        prev ? { ...prev, workspace: result.workspace, max_steps: result.max_steps } : prev,
+      )
+      if (patch.max_steps !== undefined) setNotice(`Agent max steps: ${result.max_steps}`)
+      if (patch.workspace !== undefined) setNotice(`Agent workspace: ${result.workspace}`)
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error))
+    }
   }
 
   async function refreshTitles(): Promise<void> {
@@ -777,6 +839,11 @@ export function createChat(client: GemmaClient) {
     setModel,
     setMode,
     toggleMode,
+    setProviderMode,
+    setContextLimit,
+    updatePermissions,
+    permissionConfig,
+    setAgentSettings,
     send,
     stop,
     respondPermission,

@@ -371,3 +371,55 @@ def test_unknown_permission_and_abort(web) -> None:
         assert missing.status_code == 404
         aborted = client.post("/api/agent/abort", json={"run_id": "nope"})
         assert aborted.json()["ok"] is False
+
+
+def test_agent_settings_endpoints(web, tmp_path: Path) -> None:
+    server, base, _store = web
+    with _paired_client(base, server) as client:
+        config = client.get("/api/permissions/config")
+        assert config.status_code == 200
+        data = config.json()
+        assert data["mode"] == "auto"
+        assert data["rules"] == []
+
+        # Switching mode persists and validates.
+        switched = client.post("/api/permissions/config", json={"mode": "ask"})
+        assert switched.status_code == 200
+        assert switched.json()["mode"] == "ask"
+        assert client.post("/api/permissions/config", json={"mode": "nope"}).status_code == 400
+
+        # Adding a rule stores the action:resource:effect string.
+        added = client.post(
+            "/api/permissions/config",
+            json={"add": "x", "action": "bash", "resource": "*git push*", "effect": "ask"},
+        )
+        assert added.status_code == 200
+        assert added.json()["rules"] == ["bash:*git push*:ask"]
+        assert client.post(
+            "/api/permissions/config", json={"add": "x", "effect": "maybe"}
+        ).status_code == 400
+
+        reset = client.post("/api/permissions/config", json={"reset": True})
+        assert reset.status_code == 200
+        assert reset.json()["rules"] == []
+
+        mode = client.post("/api/provider_mode", json={"mode": "native"})
+        assert mode.status_code == 200
+        assert mode.json()["provider_mode"] == "native"
+        assert client.post("/api/provider_mode", json={"mode": "bogus"}).status_code == 400
+
+        ctx = client.post("/api/context", json={"limit": 4096})
+        assert ctx.status_code == 200
+        assert ctx.json()["context_max"] == 4096
+        clamped = client.post("/api/context", json={"limit": 10})
+        assert clamped.json()["context_max"] == 2_000
+        assert client.post("/api/context", json={"limit": "wat"}).status_code == 400
+
+        settings = client.post(
+            "/api/agent/settings", json={"workspace": str(tmp_path), "max_steps": 3}
+        )
+        assert settings.status_code == 200
+        assert settings.json() == {"ok": True, "workspace": str(tmp_path), "max_steps": 3}
+        info = client.get("/api/info").json()
+        assert info["max_steps"] == 3
+        assert info["workspace"] == str(tmp_path)

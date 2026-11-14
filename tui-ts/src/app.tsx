@@ -317,12 +317,133 @@ export function App(props: { chat: Chat }) {
         if (arg === "chat" || arg === "agent") void props.chat.setMode(arg)
         else props.chat.toggleMode()
         return true
-      case "/agent":
-        void props.chat.setMode("agent")
+      case "/agent": {
+        const [first, ...rest] = arg.split(/\s+/).filter(Boolean)
+        const value = rest.join(" ")
+        if (!first) {
+          void props.chat.setMode("agent")
+          return true
+        }
+        if (first === "status") {
+          const i = info()
+          if (!i) {
+            flash("Agent status unavailable — server not connected")
+            return true
+          }
+          flash(
+            `agent ${i.mode === "agent" ? "active" : "inactive"} · ws ${i.workspace} · steps ${i.max_steps ?? 10} · provider ${i.provider_mode ?? "auto"} · perms ${i.permission_mode ?? "auto"} · ctx ${(i.context_max ?? 0).toLocaleString()}`,
+          )
+          return true
+        }
+        if (first === "dir") {
+          if (!value) {
+            flash(`Agent workspace: ${info()?.workspace ?? "?"} — usage /agent dir <path>`)
+            return true
+          }
+          void props.chat.setAgentSettings({ workspace: value })
+          return true
+        }
+        if (first === "steps") {
+          const steps = Number.parseInt(value, 10)
+          if (!Number.isFinite(steps) || steps < 1 || steps > 50) {
+            flash(`Invalid steps: ${value} — must be 1..50`)
+            return true
+          }
+          void props.chat.setAgentSettings({ max_steps: steps })
+          return true
+        }
+        if (first === "on") {
+          void props.chat.setMode("agent")
+          return true
+        }
+        if (first === "off") {
+          void props.chat.setMode("chat")
+          return true
+        }
+        flash("Usage: /agent [on|off|status|dir <path>|steps <1..50>]")
         return true
+      }
       case "/chat":
         void props.chat.setMode("chat")
         return true
+      case "/permissions": {
+        const [first, ...rest] = arg.split(/\s+/).filter(Boolean)
+        const effect = first?.toLowerCase()
+        if (!first || effect === "status") {
+          void (async () => {
+            const config = await props.chat.permissionConfig()
+            if (config) {
+              const last = config.rules[config.rules.length - 1] ?? "none"
+              flash(`Permission mode: ${config.mode} · ${config.rules.length} user rules · last: ${last}`)
+            }
+          })()
+          return true
+        }
+        if (effect === "mode") {
+          const next = rest[0]?.toLowerCase()
+          if (next !== "auto" && next !== "ask" && next !== "readonly") {
+            flash("Usage: /permissions mode auto|ask|readonly")
+            return true
+          }
+          void (async () => {
+            const config = await props.chat.updatePermissions({ mode: next })
+            if (config) flash(`Permission mode set to ${config.mode}`)
+          })()
+          return true
+        }
+        if (effect === "allow" || effect === "deny" || effect === "ask") {
+          const action = rest[0] ?? "*"
+          const resource = rest.slice(1).join(" ") || "*"
+          void (async () => {
+            const config = await props.chat.updatePermissions({
+              add: "rule",
+              effect,
+              action,
+              resource,
+            })
+            if (config) flash(`Added rule ${action}:${resource}:${effect}`)
+          })()
+          return true
+        }
+        if (effect === "reset") {
+          void (async () => {
+            const config = await props.chat.updatePermissions({ reset: true })
+            if (config) flash("Permission rules reset to defaults")
+          })()
+          return true
+        }
+        flash("Usage: /permissions [status|mode auto|ask|readonly|allow|deny|ask|reset]")
+        return true
+      }
+      case "/provider": {
+        const next = arg.toLowerCase()
+        if (next === "auto" || next === "native" || next === "prompt") {
+          void props.chat.setProviderMode(next)
+          return true
+        }
+        flash(
+          `Provider mode: ${info()?.provider_mode ?? "auto"} — usage /provider auto|native|prompt (native = tool calling, prompt = XML fallback)`,
+        )
+        return true
+      }
+      case "/context": {
+        if (arg) {
+          const limit = Number.parseInt(arg, 10)
+          if (!Number.isFinite(limit)) {
+            flash("Usage: /context <token limit>")
+            return true
+          }
+          void props.chat.setContextLimit(limit)
+          return true
+        }
+        const i = info()
+        flash(
+          i
+            ? `Context limit: ${i.context_max.toLocaleString()} tokens · workspace ${i.workspace}`
+            : "Context unavailable — server not connected",
+        )
+        return true
+      }
       case "/theme": {
         const [first, ...rest] = arg.split(/\s+/).filter(Boolean)
         if (first === "mode") {

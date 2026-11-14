@@ -321,6 +321,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._json({"commands": self._commands()})
         elif path == "/api/pair":
             self._json({"pair": self.gemma.new_pairing_url()})
+        elif path == "/api/permissions/config":
+            self._permission_config()
         elif path.startswith("/api/sessions/"):
             session_id = unquote(path.split("/", 3)[3]).split("/")[0]
             self._session_detail(session_id)
@@ -342,6 +344,14 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(self.gemma.agent.providers())
         elif path == "/api/mode":
             self._set_mode()
+        elif path == "/api/permissions/config":
+            self._write_permission_config()
+        elif path == "/api/provider_mode":
+            self._set_provider_mode()
+        elif path == "/api/context":
+            self._set_context()
+        elif path == "/api/agent/settings":
+            self._agent_settings()
         elif path == "/api/agent":
             self._agent()
         elif path == "/api/agent/abort":
@@ -409,6 +419,7 @@ class _Handler(BaseHTTPRequestHandler):
             "permission_mode": getattr(settings, "permission_mode", "auto"),
             "temperature": settings.temperature,
             "context_max": settings.context_limit,
+            "max_steps": getattr(settings, "agent_max_steps", 10),
             "dist": self.gemma.dist.is_dir(),
         }
 
@@ -557,6 +568,110 @@ class _Handler(BaseHTTPRequestHandler):
             self._json({"error": "unknown or expired request"}, 404)
             return
         self._json({"ok": True, "decision": decision})
+
+    # ── agent settings: permissions, provider mode, context limit, agent ──
+
+    def _permission_config_data(self) -> dict[str, Any]:
+        settings = self.gemma.settings
+        return {
+            "mode": getattr(settings, "permission_mode", "auto"),
+            "rules": list(getattr(settings, "permission_rules", []) or []),
+        }
+
+    def _permission_config(self) -> None:
+        self._json(self._permission_config_data())
+
+    def _write_permission_config(self) -> None:
+        settings = self.gemma.settings
+        try:
+            body = self._read_json()
+        except (ValueError, json.JSONDecodeError):
+            self._json({"error": "invalid json"}, 400)
+            return
+
+        if body.get("reset"):
+            settings.save_permission_rules([])
+            self._json(self._permission_config_data())
+            return
+
+        mode = body.get("mode")
+        if mode is not None:
+            try:
+                settings.save_permission_mode(str(mode))
+            except ValueError as exc:
+                self._json({"error": str(exc)}, 400)
+                return
+
+        add = body.get("add")
+        if add is not None:
+            effect = str(body.get("effect") or "").strip().lower()
+            action = str(body.get("action") or "").strip() or "*"
+            resource = str(body.get("resource") or "").strip() or "*"
+            if add:
+                # ``add`` may be a full "action:resource:effect" string.
+                parts = str(add).split(":")
+                if len(parts) >= 3:
+                    action, resource, effect = parts[0], ":".join(parts[1:-1]), parts[-1]
+            if effect not in ("allow", "deny", "ask"):
+                self._json({"error": "effect must be allow, deny, or ask"}, 400)
+                return
+            rules = list(getattr(settings, "permission_rules", []) or [])
+            rules.append(f"{action}:{resource}:{effect}")
+            settings.save_permission_rules(rules)
+
+        self._json(self._permission_config_data())
+
+    def _set_provider_mode(self) -> None:
+        try:
+            body = self._read_json()
+        except (ValueError, json.JSONDecodeError):
+            self._json({"error": "invalid json"}, 400)
+            return
+        try:
+            self.gemma.settings.save_provider(str(body.get("mode") or ""))
+        except ValueError as exc:
+            self._json({"error": str(exc)}, 400)
+            return
+        self._json({"ok": True, "provider_mode": self.gemma.settings.provider})
+
+    def _set_context(self) -> None:
+        try:
+            body = self._read_json()
+        except (ValueError, json.JSONDecodeError):
+            self._json({"error": "invalid json"}, 400)
+            return
+        try:
+            limit = int(body.get("limit"))
+        except (TypeError, ValueError):
+            self._json({"error": "limit must be a number"}, 400)
+            return
+        self.gemma.settings.save_context_limit(limit)
+        self._json({"ok": True, "context_max": self.gemma.settings.context_limit})
+
+    def _agent_settings(self) -> None:
+        try:
+            body = self._read_json()
+        except (ValueError, json.JSONDecodeError):
+            self._json({"error": "invalid json"}, 400)
+            return
+        settings = self.gemma.settings
+        workspace = body.get("workspace")
+        if workspace is not None:
+            settings.save_workspace_dir(str(workspace))
+        steps = body.get("max_steps")
+        if steps is not None:
+            try:
+                settings.save_agent_max_steps(int(steps))
+            except (TypeError, ValueError):
+                self._json({"error": "max_steps must be a number"}, 400)
+                return
+        self._json(
+            {
+                "ok": True,
+                "workspace": str(settings.workspace_dir),
+                "max_steps": settings.agent_max_steps,
+            }
+        )
 
     def _commands(self) -> list[dict[str, str]]:
         try:

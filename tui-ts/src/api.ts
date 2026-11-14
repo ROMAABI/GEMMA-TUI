@@ -17,6 +17,7 @@ export interface ServerInfo {
   permission_mode?: string
   temperature: number
   context_max: number
+  max_steps?: number
 }
 
 export interface SessionMeta {
@@ -72,6 +73,11 @@ export interface ProviderCatalog {
 export interface CommandDef {
   name: string
   description: string
+}
+
+export interface PermissionConfig {
+  mode: string
+  rules: string[]
 }
 
 export interface DoneStats {
@@ -246,6 +252,41 @@ export class GemmaClient {
       method: "POST",
       body: JSON.stringify({ decision }),
     })
+  }
+
+  /** Read the persisted permission policy (mode + user rules). */
+  permissionConfig(): Promise<PermissionConfig> {
+    return this.json<PermissionConfig>("/api/permissions/config")
+  }
+
+  /** Update the permission policy: mode, one rule, or a full reset. */
+  setPermissionConfig(patch: {
+    mode?: string
+    add?: string
+    effect?: "allow" | "deny" | "ask"
+    action?: string
+    resource?: string
+    reset?: boolean
+  }): Promise<PermissionConfig> {
+    return this.json<PermissionConfig>("/api/permissions/config", {
+      method: "POST",
+      body: JSON.stringify(patch),
+    })
+  }
+
+  /** Choose native tool calling, XML fallback, or automatic. */
+  setProviderMode(mode: "auto" | "native" | "prompt"): Promise<unknown> {
+    return this.json("/api/provider_mode", { method: "POST", body: JSON.stringify({ mode }) })
+  }
+
+  /** Set the context token limit (server clamps to 2,000..1,000,000). */
+  setContextLimit(limit: number): Promise<{ ok: boolean; context_max: number }> {
+    return this.json("/api/context", { method: "POST", body: JSON.stringify({ limit }) })
+  }
+
+  /** Agent settings: workspace directory and max autonomous steps. */
+  setAgentSettings(patch: { workspace?: string; max_steps?: number }): Promise<unknown> {
+    return this.json("/api/agent/settings", { method: "POST", body: JSON.stringify(patch) })
   }
 
   abortRun(runId: string): Promise<unknown> {
