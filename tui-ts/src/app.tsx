@@ -26,7 +26,7 @@ type Overlay =
   | { kind: "rename"; initial: string }
 
 /** Commands that still belong to the Textual TUI. */
-const CLASSIC_ONLY = new Set(["/websearch", "/config", "/history", "/sidebar"])
+const CLASSIC_ONLY = new Set(["/websearch"])
 
 export function App(props: { chat: Chat }) {
   const renderer = useRenderer()
@@ -46,6 +46,7 @@ export function App(props: { chat: Chat }) {
   const info = createMemo(() => props.chat.info())
   const models = createMemo(() => props.chat.models())
   const providers = createMemo(() => props.chat.providers())
+  const sessions = createMemo(() => props.chat.sessions())
   const commands = createMemo(() => mergeCommands(props.chat.commands()))
   const accent = theme
   const mode = createMemo(() => props.chat.mode())
@@ -79,6 +80,11 @@ export function App(props: { chat: Chat }) {
   const toggleSidebar = () => {
     manualSidebar = true
     setSidebar((prev) => !prev)
+  }
+
+  const setSidebarVisible = (next: boolean) => {
+    manualSidebar = true
+    setSidebar(next)
   }
 
   const flash = (text: string) => {
@@ -358,8 +364,47 @@ export function App(props: { chat: Chat }) {
       }
       case "/stats": {
         const m = metrics()
+        const s = activeSession()
         flash(
-          `ctx ${m.contextUsed}/${m.contextMax} · ${m.tokens} tok · ${m.elapsed.toFixed(1)}s · ${m.tokPerSec.toFixed(1)} tok/s`,
+          `session ${s ? s.id.slice(0, 8) : "—"} · ${s?.messages.length ?? 0} msg · ctx ${m.contextUsed}/${m.contextMax} · ${m.tokens} tok · ${m.elapsed.toFixed(1)}s · ${m.tokPerSec.toFixed(1)} tok/s`,
+        )
+        return true
+      }
+      case "/sidebar": {
+        if (arg === "show") setSidebarVisible(true)
+        else if (arg === "hide") setSidebarVisible(false)
+        else toggleSidebar()
+        flash(`Sidebar ${sidebar() ? "shown" : "hidden"}`)
+        return true
+      }
+      case "/history": {
+        const all = sessions()
+        if (!all.length) {
+          flash("No saved sessions yet")
+          return true
+        }
+        const shown = all.slice(0, 8)
+        flash(
+          shown
+            .map((session) => {
+              const when = new Date(session.updatedAt)
+              const stamp = Number.isNaN(when.getTime())
+                ? "?"
+                : when.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
+              return `${session.title} (${session.messages.length} msg, ${stamp})`
+            })
+            .join(" · ") + (all.length > shown.length ? ` · +${all.length - shown.length} more` : ""),
+        )
+        return true
+      }
+      case "/config": {
+        const i = info()
+        if (!i) {
+          flash("Config unavailable — server not connected")
+          return true
+        }
+        flash(
+          `model ${i.model} · provider ${i.provider} · mode ${i.mode} · temp ${i.temperature} · ctx ${i.context_max.toLocaleString()} · provider ${i.provider_mode ?? "auto"} · perms ${i.permission_mode ?? "auto"}`,
         )
         return true
       }

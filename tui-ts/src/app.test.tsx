@@ -59,6 +59,8 @@ const COMMANDS = {
     { name: "/new", description: "Start a new chat" },
     { name: "/clear", description: "Clear this chat" },
     { name: "/help", description: "Show commands and keys" },
+    // Server-side commands the client does not implement must still surface.
+    { name: "/compact", description: "Compact the conversation" },
   ],
 }
 
@@ -339,6 +341,68 @@ describe("OpenTUI client", () => {
     await setup.renderOnce()
 
     expect(setup.captureCharFrame()).toContain("/clear")
+  })
+
+  test("surfaces server-only commands in the slash palette", async () => {
+    current = startMock()
+    const { setup } = await mount(current)
+    setupRef = setup
+
+    setup.mockInput.typeText("/co")
+    const frame = await setup.waitForFrame((text: string) => text.includes("Compact the conversation"))
+    expect(frame).toContain("/compact")
+    expect(frame).toContain("/copy")
+  })
+
+  test("/history lists saved sessions", async () => {
+    current = startMock()
+    const { setup } = await mount(current)
+    setupRef = setup
+
+    setup.mockInput.typeText("/history")
+    setup.mockInput.pressEnter()
+    const frame = await setup.waitForFrame((text: string) => text.includes("First chat (0 msg"))
+    expect(frame).toContain("First chat (0 msg")
+  })
+
+  test("/config shows the live server config", async () => {
+    current = startMock()
+    const { setup } = await mount(current)
+    setupRef = setup
+
+    setup.mockInput.typeText("/config")
+    setup.mockInput.pressEnter()
+    const frame = await setup.waitForFrame((text: string) => text.includes("model test-model"))
+    expect(frame).toContain("provider llama.cpp")
+    expect(frame).toContain("temp 0.7")
+    expect(frame).toContain("ctx 8,192")
+  })
+
+  test("/stats includes the session and message count", async () => {
+    current = startMock()
+    const { setup } = await mount(current)
+    setupRef = setup
+
+    setup.mockInput.typeText("/stats")
+    setup.mockInput.pressEnter()
+    const frame = await setup.waitForFrame((text: string) => text.includes("0 msg"))
+    expect(frame).toContain("ctx 0/8,192")
+  })
+
+  test("/sidebar hides and shows the rail", async () => {
+    current = startMock()
+    const { setup } = await mount(current)
+    setupRef = setup
+
+    setup.mockInput.typeText("/sidebar hide")
+    setup.mockInput.pressEnter()
+    await setup.waitForFrame((text: string) => text.includes("Sidebar hidden"))
+    expect(setup.captureCharFrame()).not.toContain("◆ gemma")
+
+    setup.mockInput.typeText("/sidebar show")
+    setup.mockInput.pressEnter()
+    await setup.waitForFrame((text: string) => text.includes("Sidebar shown"))
+    expect(setup.captureCharFrame()).toContain("◆ gemma")
   })
 
   test("Tab switches chat and agent mode", async () => {

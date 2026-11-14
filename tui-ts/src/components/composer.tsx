@@ -145,6 +145,22 @@ export function Composer(props: {
 
   const modelBudget = () => Math.max(6, props.width - 14)
 
+  /** The palette shows a sliding window so long server command lists stay on screen. */
+  const PALETTE_ROWS = 10
+  const paletteWindow = createMemo(() => {
+    const count = matches().length
+    const selected0 = Math.min(Math.max(selected(), 0), Math.max(0, count - 1))
+    const start = Math.max(0, Math.min(selected0 - (PALETTE_ROWS - 1), count - PALETTE_ROWS))
+    return {
+      start,
+      items: matches().slice(start, start + PALETTE_ROWS).map((command, offset) => ({
+        command,
+        index: start + offset,
+      })),
+      hidden: Math.max(0, count - PALETTE_ROWS),
+    }
+  })
+
   const Palette = () => (
     <box
       flexDirection="column"
@@ -158,31 +174,35 @@ export function Composer(props: {
       marginTop={props.placement === "below" ? 1 : 0}
       flexShrink={0}
     >
-      <For each={matches()}>
-        {(command, index) => (
+      <For each={paletteWindow().items}>
+        {(entry) => (
           <box
             flexDirection="row"
             gap={1}
             height={1}
-            backgroundColor={index() === selected() ? colors().element : colors().panel}
+            backgroundColor={entry.index === selected() ? colors().element : colors().panel}
             onMouseDown={() => {
-              setSelected(index())
-              setText(`${command.name} `)
+              setSelected(entry.index)
+              setText(`${entry.command.name} `)
             }}
           >
-            <text style={{ fg: index() === selected() ? props.accent.accent : colors().faint }}>
-              {index() === selected() ? "▸" : " "}
+            <text style={{ fg: entry.index === selected() ? props.accent.accent : colors().faint }}>
+              {entry.index === selected() ? "▸" : " "}
             </text>
-            <text style={{ fg: index() === selected() ? colors().text : colors().dim }}>
-              <b>{command.name}</b>
+            <text style={{ fg: entry.index === selected() ? colors().text : colors().dim }}>
+              <b>{entry.command.name}</b>
             </text>
             <text style={{ fg: colors().muted }} truncate>
-              {command.description}
+              {entry.command.description}
             </text>
           </box>
         )}
       </For>
-      <text style={{ fg: colors().faint }}>↑↓ navigate · Tab complete · Esc close</text>
+      <text style={{ fg: colors().faint }}>
+        {paletteWindow().hidden > 0
+          ? `↑↓ navigate · ${paletteWindow().hidden} more · Tab complete · Esc close`
+          : "↑↓ navigate · Tab complete · Esc close"}
+      </text>
     </box>
   )
 
