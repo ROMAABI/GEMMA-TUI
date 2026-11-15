@@ -23,10 +23,48 @@ const TERMINAL: TerminalPalette = {
 
 describe("theme resolution", () => {
   test("built-ins expose dark and light variants", () => {
-    expect(THEMES.map((theme) => theme.id)).toEqual(["opencode", "violet", "cyan", "emerald", "system"])
+    expect(THEMES.map((theme) => theme.id)).toEqual([
+      "opencode",
+      "violet",
+      "cyan",
+      "emerald",
+      "tokyo-night",
+      "deep-purple",
+      "dracula",
+      "nord",
+      "cyberpunk",
+      "system",
+    ])
     for (const theme of THEMES.filter((candidate) => !candidate.system)) {
-      expect(theme.dark.palette).toBe(DARK_PALETTE)
-      expect(theme.light.palette).toBe(LIGHT_PALETTE)
+      expect(theme.dark.accent).toBeDefined()
+      expect(theme.light.accent).toBeDefined()
+    }
+  })
+
+  test("neutral themes share the opencode neutrals", () => {
+    for (const id of ["opencode", "violet", "cyan", "emerald"]) {
+      const theme = THEMES.find((candidate) => candidate.id === id)
+      expect(theme?.dark.palette).toBe(DARK_PALETTE)
+      expect(theme?.light.palette).toBe(LIGHT_PALETTE)
+    }
+  })
+
+  test("portable themes keep their own dark neutrals", () => {
+    const pages: Record<string, string> = {
+      "tokyo-night": "#0a101d",
+      "deep-purple": "#0a0e17",
+      dracula: "#282a36",
+      nord: "#242933",
+      cyberpunk: "#0a0a12",
+    }
+    for (const [id, page] of Object.entries(pages)) {
+      const dark = resolveTheme(id, "dark", EMPTY)
+      expect(dark.colors.page).toBe(page)
+      expect(dark.accent).toBeDefined()
+
+      const light = resolveTheme(id, "light", EMPTY)
+      expect(light.mode).toBe("light")
+      expect(light.colors.page).toBe("#ffffff")
     }
   })
 

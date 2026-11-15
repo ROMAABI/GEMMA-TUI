@@ -798,7 +798,7 @@ describe("OpenTUI client", () => {
 
     setup.mockInput.pressKey("t", { ctrl: true })
     await setup.waitForFrame((text: string) => text.includes("Theme"))
-    for (let index = 0; index < 4; index += 1) setup.mockInput.pressKey("ARROW_DOWN")
+    for (let index = 0; index < 9; index += 1) setup.mockInput.pressKey("ARROW_DOWN")
     setup.mockInput.pressEnter()
     await setup.renderOnce()
 

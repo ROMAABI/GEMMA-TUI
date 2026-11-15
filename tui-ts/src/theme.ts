@@ -120,6 +120,41 @@ function variant(accent: string, accentDim: string, palette: Palette): ThemeVari
 }
 
 /**
+ * Build a palette from a full color set (portable themes keep their own
+ * neutrals rather than sharing the opencode dark neutrals). Semantic colors
+ * stay shared; `faint` and `borderSoft` derive from the theme's own colors.
+ */
+function themedPalette(
+  page: string,
+  panel: string,
+  card: string,
+  element: string,
+  code: string,
+  border: string,
+  text: string,
+  dim: string,
+  muted: string,
+): Palette {
+  return {
+    page,
+    panel,
+    card,
+    element,
+    border,
+    borderSoft: tint(border, page, 0.45),
+    text,
+    dim,
+    muted,
+    faint: tint(muted, page, 0.4),
+    code,
+    danger: "#e06c75",
+    success: "#7fd88f",
+    warning: "#f5a742",
+    info: "#5c9cf5",
+  }
+}
+
+/**
  * Fallback for the `system` theme when the terminal palette cannot be read:
  * ANSI slots plus the terminal's own default foreground/background, so the UI
  * still inherits the terminal instead of forcing gemma's colors.
@@ -174,6 +209,61 @@ export const THEMES: Theme[] = [
     description: "muted green on graphite",
     dark: variant("#7fd88f", "#33663d", DARK_PALETTE),
     light: variant("#2f8f4a", "#b6dfc1", LIGHT_PALETTE),
+  },
+  {
+    id: "tokyo-night",
+    name: "Tokyo Night",
+    description: "moonlit blue, neon sky",
+    dark: variant(
+      "#38bdf8",
+      tint("#38bdf8", "#0a101d", 0.55),
+      themedPalette("#0a101d", "#0d1424", "#111a2e", "#162038", "#0b111f", "#1e2b45", "#f1f5f9", "#94a3b8", "#64748b"),
+    ),
+    light: variant("#0284c7", "#bae6fd", LIGHT_PALETTE),
+  },
+  {
+    id: "deep-purple",
+    name: "Deep Purple",
+    description: "violet bloom on indigo night",
+    dark: variant(
+      "#c084fc",
+      tint("#c084fc", "#0a0e17", 0.55),
+      themedPalette("#0a0e17", "#0d111a", "#111625", "#141a2d", "#0b0f19", "#1a2234", "#e2e8f0", "#94a3b8", "#64748b"),
+    ),
+    light: variant("#6d28d9", "#ddd0fb", LIGHT_PALETTE),
+  },
+  {
+    id: "dracula",
+    name: "Dracula",
+    description: "purple and pink on classic dracula",
+    dark: variant(
+      "#bd93f9",
+      tint("#bd93f9", "#282a36", 0.55),
+      themedPalette("#282a36", "#21222c", "#343746", "#3e4154", "#1e1f29", "#44475a", "#f8f8f2", "#bfbfbf", "#6272a4"),
+    ),
+    light: variant("#8250c4", "#e4d5fc", LIGHT_PALETTE),
+  },
+  {
+    id: "nord",
+    name: "Nord Arctic",
+    description: "frost blue on polar dark",
+    dark: variant(
+      "#88c0d0",
+      tint("#88c0d0", "#242933", 0.55),
+      themedPalette("#242933", "#1e222a", "#2e3440", "#353c4a", "#191d24", "#3b4252", "#eceff4", "#d8dee9", "#4c566a"),
+    ),
+    light: variant("#4a7ea8", "#cfe0ec", LIGHT_PALETTE),
+  },
+  {
+    id: "cyberpunk",
+    name: "Cyberpunk",
+    description: "neon yellow over the grid",
+    dark: variant(
+      "#facc15",
+      tint("#facc15", "#0a0a12", 0.55),
+      themedPalette("#0a0a12", "#0e0e1a", "#141424", "#1a1a30", "#07070d", "#2a2a48", "#f8fafc", "#94a3b8", "#64748b"),
+    ),
+    light: variant("#a16207", "#f5e6a8", LIGHT_PALETTE),
   },
   {
     id: "system",
