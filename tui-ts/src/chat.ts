@@ -13,7 +13,7 @@ import {
   type ServerInfo,
   type ServerMessage,
 } from "./api"
-import { estimateTokens, titleFromPrompt } from "./format"
+import { displayModelName, estimateTokens, titleFromPrompt } from "./format"
 
 export type ToolStatus = "running" | "done" | "error"
 
@@ -384,7 +384,7 @@ export function createChat(client: GemmaClient) {
           })),
         }
       })
-      setNotice(`Model set to ${name}`)
+      setNotice(`Model set to ${displayModelName(name)}`)
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error))
     }

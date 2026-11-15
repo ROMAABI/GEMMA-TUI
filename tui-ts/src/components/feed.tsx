@@ -6,7 +6,7 @@ import { colors } from "../theme"
 import { MessageCard } from "./message"
 
 /** Scrollable transcript for the active session. */
-export function Feed(props: { chat: Chat; accent: ColorInput; model: string; onCopy: (text: string) => void }) {
+export function Feed(props: { chat: Chat; accent: ColorInput; onCopy: (text: string) => void }) {
   let box: ScrollBoxRenderable | undefined
   const session = createMemo(() => props.chat.activeSession())
   const messages = createMemo(() => session()?.messages ?? [])
@@ -44,7 +44,6 @@ export function Feed(props: { chat: Chat; accent: ColorInput; model: string; onC
               <MessageCard
                 message={message}
                 accent={props.accent}
-                model={props.model}
                 streaming={streamingId() === message.id}
                 onCopy={props.onCopy}
               />

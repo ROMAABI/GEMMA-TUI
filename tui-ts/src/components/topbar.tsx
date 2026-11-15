@@ -1,6 +1,6 @@
 import { createSignal, onCleanup } from "solid-js"
 import { colors } from "../theme"
-import { truncate } from "../format"
+import { displayModelName, truncate } from "../format"
 
 function clockLabel(): string {
   return new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
@@ -42,7 +42,7 @@ export function Header(props: {
         ●
       </text>
       <text style={{ fg: colors().muted }} marginRight={1}>
-        {truncate(props.model || "no model", compact() ? 10 : 22)}
+        {truncate(displayModelName(props.model) || "no model", compact() ? 10 : 22)}
       </text>
       {!compact() && <text style={{ fg: colors().faint }}>{clock()}</text>}
     </box>

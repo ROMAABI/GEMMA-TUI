@@ -3,7 +3,7 @@ import { useKeyboard, useTerminalDimensions } from "@opentui/solid"
 import type { InputRenderable } from "@opentui/core"
 import type { AgentEvent, CommandDef, ModelEntry, ModelList, Provider, ProviderCatalog } from "../api"
 import { colors, previewTheme, THEMES, type ResolvedTheme, type ThemeMode } from "../theme"
-import { truncate } from "../format"
+import { displayModelName, truncate } from "../format"
 
 function Frame(props: {
   title: string
@@ -127,7 +127,11 @@ export function ModelPicker(props: {
   })
 
   const modelCount = () => flat().length
-  const height = () => Math.min(16, Math.max(6, rows().length + 4))
+  // Model rows take two lines (clean name + the full id underneath).
+  const lines = createMemo(() =>
+    rows().reduce((sum, row) => sum + (row.kind === "model" ? 2 : 1), 0),
+  )
+  const height = () => Math.min(22, Math.max(6, lines() + 4))
 
   return (
     <Frame title="Select model" accent={props.accent} width={66} height={height()}>
@@ -148,25 +152,33 @@ export function ModelPicker(props: {
                   {(() => {
                     const entry = row as Extract<Row, { kind: "model" }>
                     const active = entry.model.active
+                    const isSelected = entry.index === selected()
                     return (
                       <box
-                        flexDirection="row"
-                        gap={1}
-                        height={1}
-                        backgroundColor={entry.index === selected() ? colors().element : colors().panel}
+                        flexDirection="column"
+                        height={2}
+                        backgroundColor={isSelected ? colors().element : colors().panel}
                         onMouseDown={() => {
                           setSelected(entry.index)
                           props.onSelect(entry.model.name, entry.provider.id)
                           props.onClose()
                         }}
                       >
-                        <text style={{ fg: entry.index === selected() ? props.accent.accent : colors().faint }}>
-                          {entry.index === selected() ? "▸" : " "}
-                        </text>
-                        <text style={{ fg: active ? props.accent.accent : colors().text }}>
-                          {active ? "●" : "○"} {truncate(entry.model.name, 44)}
-                        </text>
-                        <text style={{ fg: colors().faint }}>{SOURCE_LABEL[entry.model.source] ?? entry.model.source}</text>
+                        <box flexDirection="row" gap={1} height={1}>
+                          <text style={{ fg: isSelected ? props.accent.accent : colors().faint }}>
+                            {isSelected ? "▸" : " "}
+                          </text>
+                          <text style={{ fg: active ? props.accent.accent : colors().text }}>
+                            {active ? "●" : "○"} {truncate(displayModelName(entry.model.name), 40)}
+                          </text>
+                          <text style={{ fg: colors().faint }}>
+                            {SOURCE_LABEL[entry.model.source] ?? entry.model.source}
+                          </text>
+                        </box>
+                        <box flexDirection="row" gap={1} height={1}>
+                          <text style={{ fg: colors().faint }}> </text>
+                          <text style={{ fg: colors().faint }}>{truncate(entry.model.name, 56)}</text>
+                        </box>
                       </box>
                     )
                   })()}

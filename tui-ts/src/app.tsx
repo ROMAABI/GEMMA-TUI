@@ -2,6 +2,7 @@ import { Show, createEffect, createMemo, createSignal, on, onCleanup } from "sol
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid"
 import type { Chat } from "./chat"
 import { mergeCommands } from "./commands"
+import { displayModelName } from "./format"
 import { activeThemeMode, colors, isThemeMode, setTheme, setThemeMode, theme, THEMES } from "./theme"
 import { loadPrefs, savePrefs } from "./prefs"
 import { Feed } from "./components/feed"
@@ -550,7 +551,7 @@ export function App(props: { chat: Chat }) {
           return true
         }
         flash(
-          `model ${i.model} · provider ${i.provider} · mode ${i.mode} · temp ${i.temperature} · ctx ${i.context_max.toLocaleString()} · provider ${i.provider_mode ?? "auto"} · perms ${i.permission_mode ?? "auto"}`,
+          `model ${displayModelName(i.model)} · provider ${i.provider} · mode ${i.mode} · temp ${i.temperature} · ctx ${i.context_max.toLocaleString()} · provider ${i.provider_mode ?? "auto"} · perms ${i.permission_mode ?? "auto"}`,
         )
         return true
       }
@@ -756,7 +757,6 @@ export function App(props: { chat: Chat }) {
                 <Feed
                   chat={props.chat}
                   accent={accent().accent}
-                  model={info()?.model ?? ""}
                   onCopy={copyText}
                 />
                 <ComposerBlock placement="above" />

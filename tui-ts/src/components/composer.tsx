@@ -2,7 +2,7 @@ import { For, Show, createEffect, createMemo, createSignal, on } from "solid-js"
 import type { KeyEvent, TextareaRenderable } from "@opentui/core"
 import type { CommandDef } from "../api"
 import { colors, type ResolvedTheme } from "../theme"
-import { truncate } from "../format"
+import { displayModelName, truncate } from "../format"
 
 const FALLBACK_COMMANDS: CommandDef[] = [
   { name: "/new", description: "Start a new session" },
@@ -247,7 +247,7 @@ export function Composer(props: {
         />
         <text flexShrink={1} truncate marginRight={1} onMouseDown={props.onModel}>
           <span style={{ fg: colors().text }}>
-            {truncate(props.model || "no model", modelBudget())}
+            {truncate(displayModelName(props.model) || "no model", modelBudget())}
           </span>
           <span style={{ fg: colors().muted }}> ⌄</span>
         </text>

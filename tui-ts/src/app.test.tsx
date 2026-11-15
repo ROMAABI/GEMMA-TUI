@@ -434,7 +434,7 @@ describe("OpenTUI client", () => {
     expect(frame).toContain("Where should we start?")
     // The prompt pill with real server data
     expect(frame).toContain("Ask anything… (/ for commands)")
-    expect(frame).toContain("test-model")
+    expect(frame).toContain("test model")
     expect(frame).toContain("llama.cpp")
     expect(frame).toContain("tab mode")
     expect(frame).toContain("ctrl+k models")
@@ -551,7 +551,7 @@ describe("OpenTUI client", () => {
 
     setup.mockInput.typeText("/config")
     setup.mockInput.pressEnter()
-    const frame = await setup.waitForFrame((text: string) => text.includes("model test-model"))
+    const frame = await setup.waitForFrame((text: string) => text.includes("model test model"))
     expect(frame).toContain("provider llama.cpp")
     expect(frame).toContain("temp 0.7")
     expect(frame).toContain("ctx 8,192")

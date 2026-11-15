@@ -128,7 +128,6 @@ function SearchBlock(props: { search: NonNullable<Message["search"]>; accent: Co
 export function MessageCard(props: {
   message: Message
   accent: ColorInput
-  model: string
   streaming: boolean
   onCopy: (text: string) => void
 }) {
@@ -144,7 +143,6 @@ export function MessageCard(props: {
               <text style={{ fg: props.accent }}>
                 <b>gemma</b>
               </text>
-              <text style={{ fg: colors().faint }}>{truncateModel(props.model)}</text>
               <text style={{ fg: colors().faint }}>{clockTime(props.message.createdAt)}</text>
               <Show when={props.streaming}>
                 <text style={{ fg: colors().warning }}>● working</text>
@@ -232,9 +230,4 @@ export function MessageCard(props: {
       </Show>
     </box>
   )
-}
-
-function truncateModel(model: string): string {
-  if (!model) return ""
-  return model.length > 28 ? `${model.slice(0, 27)}…` : model
 }
