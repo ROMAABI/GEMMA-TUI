@@ -86,7 +86,7 @@ function BlockView(props: { block: Block; accent: ColorInput; onCopy?: (text: st
 
       <Match when={props.block.kind === "heading" ? props.block : null}>
         {(block: Accessor<{ kind: "heading"; level: number; text: string }>) => (
-          <text style={{ fg: block().level <= 2 ? props.accent : colors().text }} marginTop={1}>
+          <text style={{ fg: block().level <= 2 ? props.accent : colors().text }} wrapMode="word" marginTop={1}>
             <b>{block().text}</b>
           </text>
         )}
@@ -97,7 +97,7 @@ function BlockView(props: { block: Block; accent: ColorInput; onCopy?: (text: st
           <box flexDirection="column">
             <For each={block().items}>
               {(item, index) => (
-                <text>
+                <text wrapMode="word">
                   <span style={{ fg: props.accent }}>{block().ordered ? `${index() + 1}.` : "•"}</span>{" "}
                   <InlineSegments text={item} accent={props.accent} />
                 </text>
@@ -110,7 +110,7 @@ function BlockView(props: { block: Block; accent: ColorInput; onCopy?: (text: st
       <Match when={props.block.kind === "quote" ? props.block : null}>
         {(block: Accessor<{ kind: "quote"; text: string }>) => (
           <box border={["left"]} borderColor={colors().border} paddingLeft={1}>
-            <text style={{ fg: colors().dim }}>{block().text}</text>
+            <text style={{ fg: colors().dim }} wrapMode="word">{block().text}</text>
           </box>
         )}
       </Match>
@@ -127,7 +127,7 @@ function BlockView(props: { block: Block; accent: ColorInput; onCopy?: (text: st
 
       <Match when={props.block.kind === "paragraph" ? props.block : null}>
         {(block: Accessor<{ kind: "paragraph"; text: string }>) => (
-          <text>
+          <text wrapMode="word">
             <InlineSegments text={block().text} accent={props.accent} />
           </text>
         )}

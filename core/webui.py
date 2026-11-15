@@ -20,9 +20,9 @@ import secrets
 import threading
 import time
 import webbrowser
+import httpx
 from datetime import datetime, timezone
 from http import HTTPStatus
-from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -201,7 +201,9 @@ class GemmaWebServer:
         text = ""
         tokens = 0
         try:
-            async for chunk in client.stream_chat(self.build_messages(session_id, context)):
+            async for chunk in client.stream_chat(
+                self.build_messages(session_id, context), prefill=bool(context)
+            ):
                 if not chunk:
                     continue
                 if first_at is None:
@@ -379,6 +381,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._service_action(path.split("/")[-1])
         elif path == "/api/research/prepare":
             self._research_prepare()
+        elif path == "/api/research/read":
+            self._research_read()
         elif path == "/api/research/test":
             self._research_test()
         elif path == "/api/research/config":
@@ -743,6 +747,15 @@ class _Handler(BaseHTTPRequestHandler):
 
     # ── web research (SearXNG) ──────────────────────────────────────────
 
+    @staticmethod
+    def _result_payload(item: dict[str, Any]) -> dict[str, str]:
+        return {
+            "title": str(item.get("title") or ""),
+            "url": str(item.get("url") or ""),
+            "engine": str(item.get("engine") or ""),
+            "date": str(item.get("date") or ""),
+        }
+
     def _research_prepare(self) -> None:
         try:
             body = self._read_json()
@@ -756,6 +769,7 @@ class _Handler(BaseHTTPRequestHandler):
         if _SMALLTALK_RE.match(message):
             self._json({"search": False, "reason": "smalltalk"})
             return
+        deep_read = bool(body.get("deep_read", True))
 
         async def run() -> dict[str, Any]:
             from core.orchestrator import decide_search
@@ -772,25 +786,23 @@ class _Handler(BaseHTTPRequestHandler):
                     results = await web_search(
                         query,
                         searxng_url=settings.searxng_url,
-                        deep_read=settings.searxng_deep_read,
+                        deep_read=deep_read,
                     )
                 except Exception:  # noqa: BLE001 - fall through to the next query
                     results = []
                 if results:
-                    return {
+                    response: dict[str, Any] = {
                         "search": True,
                         "query": query,
-                        "context": format_context(results),
-                        "results": [
-                            {
-                                "title": str(item.get("title") or ""),
-                                "url": str(item.get("url") or ""),
-                                "engine": str(item.get("engine") or ""),
-                            }
-                            for item in results
-                        ],
+                        "results": [self._result_payload(item) for item in results],
                         "elapsed": round(time.monotonic() - started, 3),
                     }
+                    # The one-shot callers (classic flow, web UI) also want the
+                    # deep-read context; the TS client runs the second phase
+                    # itself so it can show a "reading…" status in between.
+                    if deep_read:
+                        response["context"] = format_context(results)
+                    return response
             # Every query came back empty: tell the client why, so it can show
             # a clear error instead of silently answering from memory.
             from core.research import check_searxng_health
@@ -802,6 +814,58 @@ class _Handler(BaseHTTPRequestHandler):
                 "results": [],
                 "healthy": healthy,
                 "detail": detail,
+            }
+
+        self._json(asyncio.run(run()))
+
+    def _research_read(self) -> None:
+        """Second phase for the TS client: deep-read the top result pages.
+
+        Body: {query, results: [{title,url,engine,date}]}. Fetches page text in
+        parallel (capped, timed) and returns the model-ready context plus the
+        enriched results so the client can show sources with dates.
+        """
+        try:
+            body = self._read_json()
+        except (ValueError, json.JSONDecodeError):
+            self._json({"error": "invalid json"}, 400)
+            return
+        query = str(body.get("query") or "").strip()
+        raw_results = body.get("results") or []
+        if not isinstance(raw_results, list) or not raw_results:
+            self._json({"ok": False, "error": "results required", "results": []})
+            return
+
+        results = [
+            {
+                "title": str(item.get("title") or ""),
+                "url": str(item.get("url") or ""),
+                "engine": str(item.get("engine") or ""),
+                "date": str(item.get("date") or ""),
+                "snippet": str(item.get("snippet") or ""),
+            }
+            for item in raw_results[:6]
+            if isinstance(item, dict) and str(item.get("url") or "")
+        ]
+        if not results:
+            self._json({"ok": False, "error": "no usable results", "results": []})
+            return
+
+        async def run() -> dict[str, Any]:
+            from core.research import _enrich, _USER_AGENTS, format_context
+
+            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+                from core.research import _rank_results
+
+                enriched = await _enrich(
+                    results, client, _USER_AGENTS[0], deep_read=True
+                )
+            enriched = _rank_results(enriched)
+            return {
+                "ok": True,
+                "query": query,
+                "context": format_context(enriched),
+                "results": [self._result_payload(item) | {"excerpt": str(item.get("excerpt") or "")} for item in enriched],
             }
 
         self._json(asyncio.run(run()))

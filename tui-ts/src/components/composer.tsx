@@ -226,6 +226,7 @@ export function Composer(props: {
           ref={area}
           focused
           flexGrow={1}
+          minWidth={8}
           minHeight={1}
           maxHeight={5}
           backgroundColor={colors().card}
@@ -244,7 +245,7 @@ export function Composer(props: {
           onContentChange={handleContentChange}
           onKeyDown={onKeyDown}
         />
-        <text flexShrink={0} marginRight={1} onMouseDown={props.onModel}>
+        <text flexShrink={1} truncate marginRight={1} onMouseDown={props.onModel}>
           <span style={{ fg: colors().text }}>
             {truncate(props.model || "no model", modelBudget())}
           </span>

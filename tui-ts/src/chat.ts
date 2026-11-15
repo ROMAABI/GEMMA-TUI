@@ -47,8 +47,8 @@ export interface Message {
 }
 
 export interface SearchState {
-  status: "searching" | "ok" | "failed"
-  sources?: Array<{ title: string; domain: string }>
+  status: "searching" | "reading" | "ok" | "failed"
+  sources?: Array<{ title: string; domain: string; date?: string }>
   error?: string
 }
 
@@ -640,7 +640,7 @@ export function createChat(client: GemmaClient) {
     sessionId: string,
     assistantId: string,
     raw: string,
-  ): Promise<{ context?: string; sources?: Array<{ title: string; domain: string }> }> {
+  ): Promise<{ context?: string; sources?: Array<{ title: string; domain: string; date?: string }> }> {
     const mark = (search: SearchState | undefined) =>
       patchMessage(sessionId, assistantId, (message) => ({ ...message, search }))
 
@@ -650,23 +650,38 @@ export function createChat(client: GemmaClient) {
       return {}
     }
 
+    // Phase 1: judge + SearXNG search (fast, no page fetches).
     mark({ status: "searching" })
     try {
-      const prep = await client.researchPrepare(raw)
+      const prep = await client.researchPrepare(raw.trim(), false)
       if (!prep.search) {
         mark(undefined)
         return {}
       }
-      const sources = (prep.results ?? []).map((result) => ({
+      if (!prep.results?.length) {
+        mark({ status: "failed", error: prep.detail ?? "no results" })
+        return {}
+      }
+
+      const sources = prep.results.map((result) => ({
         title: result.title ?? "",
         domain: domainOf(result.url ?? ""),
+        date: result.date ?? "",
       }))
-      if (prep.context && sources.length > 0) {
-        mark({ status: "ok", sources })
-        return { context: prep.context, sources }
+
+      // Phase 2: read the top pages (server fetches them in parallel).
+      mark({ status: "reading", sources })
+      const read = await client.researchRead(prep.query ?? raw.trim(), prep.results)
+      const dated = read.results.map((result) => ({
+        title: result.title ?? "",
+        domain: domainOf(result.url ?? ""),
+        date: result.date ?? "",
+      }))
+      if (read.context) {
+        mark({ status: "ok", sources: dated })
+        return { context: read.context, sources: dated }
       }
-      const detail = prep.detail ?? "no results"
-      mark({ status: "failed", error: detail })
+      mark({ status: "failed", error: "page reads returned nothing" })
       return {}
     } catch (error) {
       mark({ status: "failed", error: error instanceof Error ? error.message : String(error) })

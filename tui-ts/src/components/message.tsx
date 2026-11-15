@@ -90,10 +90,16 @@ function SearchBlock(props: { search: NonNullable<Message["search"]>; accent: Co
           <text style={{ fg: colors().muted }}>Searching the web…</text>
         </box>
       </Match>
-      <Match when={props.search.status === "failed"}>
+      <Match when={props.search.status === "reading"}>
         <box flexDirection="row" height={1} gap={1} marginTop={1}>
+          <text style={{ fg: props.accent }}>✦</text>
+          <text style={{ fg: colors().muted }}>Reading top results…</text>
+        </box>
+      </Match>
+      <Match when={props.search.status === "failed"}>
+        <box flexDirection="row" gap={1} marginTop={1} flexShrink={0}>
           <text style={{ fg: colors().danger }}>⚠</text>
-          <text style={{ fg: colors().danger }} truncate>
+          <text style={{ fg: colors().danger }} wrapMode="word" flexGrow={1}>
             {`Web search failed: ${props.search.error ?? "unavailable"} — answering from model memory`}
           </text>
         </box>
@@ -105,8 +111,10 @@ function SearchBlock(props: { search: NonNullable<Message["search"]>; accent: Co
           </text>
           <For each={props.search.sources ?? []}>
             {(source, index) => (
-              <text style={{ fg: colors().muted }} truncate>
-                {`${index() + 1}. ${source.title || source.domain} — ${source.domain}`}
+              <text style={{ fg: colors().muted }} wrapMode="word">
+                {`${index() + 1}. ${source.title || source.domain} — ${source.domain}${
+                  source.date ? ` · ${source.date}` : ""
+                }`}
               </text>
             )}
           </For>

@@ -105,6 +105,10 @@ export interface ResearchResult {
   url?: string
   engine?: string
   snippet?: string
+  /** Published date (YYYY-MM-DD) when the engine reports one. */
+  date?: string
+  /** Page text fetched during the deep-read phase. */
+  excerpt?: string
 }
 
 export interface ResearchTest {
@@ -218,9 +222,10 @@ export class GemmaClient {
     }
   }
 
-  private async json<T>(path: string, init: RequestInit = {}): Promise<T> {
+  private async json<T>(path: string, init: RequestInit = {}, timeoutMs?: number): Promise<T> {
     const response = await fetch(`${this.base}${path}`, {
       ...init,
+      signal: timeoutMs ? AbortSignal.timeout(timeoutMs) : init.signal,
       headers: this.headers((init.headers as Record<string, string>) ?? {}),
     })
     if (response.status === 401) throw new PairingError("Pairing required.")
@@ -361,11 +366,25 @@ export class GemmaClient {
   }
 
   /** Judge + SearXNG pipeline for one user message (server-side). */
-  researchPrepare(message: string): Promise<ResearchPrepare> {
-    return this.json("/api/research/prepare", {
-      method: "POST",
-      body: JSON.stringify({ message }),
-    })
+  /** Judge the message and run the SearXNG search (phase 1; no page reads). */
+  researchPrepare(message: string, deepRead = true): Promise<ResearchPrepare> {
+    return this.json(
+      "/api/research/prepare",
+      { method: "POST", body: JSON.stringify({ message, deep_read: deepRead }) },
+      15_000,
+    )
+  }
+
+  /** Phase 2: fetch the top result pages in parallel and build the context. */
+  researchRead(
+    query: string,
+    results: ResearchResult[],
+  ): Promise<{ ok: boolean; query: string; context: string; results: ResearchResult[] }> {
+    return this.json(
+      "/api/research/read",
+      { method: "POST", body: JSON.stringify({ query, results }) },
+      15_000,
+    )
   }
 
   /** SearXNG connectivity snapshot. */

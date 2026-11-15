@@ -52,4 +52,21 @@ describe("inline", () => {
   test("leaves unmatched markers as text", () => {
     expect(inline("2 * 3 = 6 and a_b")).toEqual([{ text: "2 * 3 = 6 and a_b" }])
   })
+
+  test("does not italicize intraword underscores or asterisks", () => {
+    // The classic breakage: "Gemini (language model)" style text plus
+    // snake_case and URLs that contain underscores.
+    expect(inline("Gemini (language_model) is a model")).toEqual([
+      { text: "Gemini (language_model) is a model" },
+    ])
+    expect(inline("model_name_v3 runs fine")).toEqual([{ text: "model_name_v3 runs fine" }])
+    expect(inline("see https://x.test/wiki/Gemini_(language_model) now")).toEqual([
+      { text: "see https://x.test/wiki/Gemini_(language_model) now" },
+    ])
+    // Real emphasis still works mid-sentence and around punctuation.
+    expect(inline("this is (very) *fast*")).toEqual([
+      { text: "this is (very) " },
+      { text: "fast", italic: true },
+    ])
+  })
 })

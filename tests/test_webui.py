@@ -504,7 +504,7 @@ def test_research_endpoints(web, monkeypatch: pytest.MonkeyPatch) -> None:
         assert data["query"] == "latest gemma news"
         assert "WEB search results" in data["context"] or "### Web search results" in data["context"]
         assert data["results"] == [
-            {"title": "Gemma release notes", "url": "https://example.com/gemma", "engine": "searxng"}
+            {"title": "Gemma release notes", "url": "https://example.com/gemma", "engine": "searxng", "date": ""}
         ]
 
         # Nothing found → search stays true, but the failure is explicit.
@@ -585,3 +585,90 @@ def test_init_workspace_endpoint(web, tmp_path: Path, monkeypatch: pytest.Monkey
 
         again = client.post("/api/init")
         assert again.json() == {"ok": False, "path": str(target), "reason": "exists"}
+
+
+def test_research_fresh_quality(web, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fresh queries get time windows + news categories, ranked sources, dated
+    results, a compact context, and the two-phase prepare/read flow."""
+    import core.research as research
+
+    # Fresh detection drives the recency window.
+    assert research._is_fresh_query("what is the latest released gemini model")
+    assert research._is_fresh_query("current news")
+    assert not research._is_fresh_query("write a python loop")
+    assert not research._is_fresh_query("hi")
+
+    # Wikipedia is deprioritized, dated results come first.
+    ranked = research._rank_results(
+        [
+            {"title": "Wiki", "url": "https://en.wikipedia.org/wiki/A", "date": ""},
+            {"title": "Old news", "url": "https://old.example.com/a", "date": "2024-01-01"},
+            {"title": "Fresh", "url": "https://fresh.example.com/b", "date": "2025-11-01"},
+        ]
+    )
+    assert ranked[0]["title"] == "Fresh"
+    assert ranked[-1]["title"] == "Wiki"
+
+    # SearXNG params carry the window and categories.
+    params = research._searxng_params("latest gemini", "month", "news,general")
+    assert params["time_range"] == "month"
+    assert params["categories"] == "news,general"
+    assert "time_range" not in research._searxng_params("hello")
+
+    # The context prompt carries today's date, recency and honesty rules, and
+    # stays under ~2000 tokens.
+    context = research.format_context(
+        [
+            {
+                "title": "Fresh news",
+                "url": "https://news.example.com/a",
+                "date": "2025-11-01",
+                "snippet": "short snippet",
+                "excerpt": "x" * 9000,
+            }
+        ]
+    )
+    assert "Today is" in context
+    assert "most recent" in context.lower()
+    assert "not found in results" in context
+    assert "(Source:" not in context
+    assert "Published: 2025-11-01" in context
+    assert len(context) <= research._CONTEXT_CHAR_BUDGET + 700  # instructions overhead
+
+    server, base, _store = web
+    with _paired_client(base, server) as client:
+        async def fake_decide(question, llm):  # type: ignore[no-untyped-def]
+            return True, ["latest gemini model", question]
+
+        async def fake_search(query, **kwargs):  # type: ignore[no-untyped-def]
+            return [
+                {"title": "Fresh news", "url": "https://news.example.com/a", "engine": "searxng", "date": "2025-11-01"},
+            ]
+
+        monkeypatch.setattr("core.orchestrator.decide_search", fake_decide)
+        monkeypatch.setattr("core.research.web_search", fake_search)
+
+        # Phase 1 (deep_read=false) returns results only — fast "searching".
+        prep = client.post(
+            "/api/research/prepare",
+            json={"message": "what is the latest released gemini model", "deep_read": False},
+        )
+        data = prep.json()
+        assert data["search"] is True
+        assert data["results"][0]["date"] == "2025-11-01"
+        assert "context" not in data
+
+        # Phase 2 deep-reads the pages in parallel and builds the context.
+        async def fake_enrich(results, client, ua, deep_read=True):  # type: ignore[no-untyped-def]
+            return [{**results[0], "excerpt": "page text"}]
+
+        monkeypatch.setattr("core.research._enrich", fake_enrich)
+        read = client.post(
+            "/api/research/read",
+            json={"query": "latest gemini model", "results": data["results"]},
+        )
+        read_data = read.json()
+        assert read_data["ok"] is True
+        assert "page text" in read_data["context"]
+        assert read_data["results"][0]["excerpt"] == "page text"
+        assert read_data["results"][0]["date"] == "2025-11-01"

@@ -99,6 +99,10 @@ def _judge_prompt(question: str) -> str:
         "<end_of_turn>\n"
         f"<start_of_turn>user\n{question}<end_of_turn>\n"
         "<start_of_turn>model\n"
+        # Prefill a closed thinking channel: the 16-token answer budget is
+        # otherwise eaten by the model's thinking process, and the fallback
+        # heuristics would decide every search.
+        "<|channel>Ok.<channel|>"
     )
 
 
@@ -106,13 +110,18 @@ async def decide_search(question: str, client: LlamaClient) -> tuple[bool, list[
     """Return (needs_web_search, candidate_queries_in_priority_order)."""
     heuristic = _has_realtime_signal(question)
     office_q = _office_query(question)
+
+    # Fresh questions ("latest/current/newest…") and office-holder questions
+    # skip the LLM judge entirely — a search round-trip is worth more than a
+    # polished query, and the heuristic is exactly what the judge would say.
+    if heuristic or office_q:
+        return True, [office_q, question] if office_q else [question]
+
     try:
         raw = await client.complete(
             _judge_prompt(question), n_predict=16, temperature=0.0
         )
     except Exception:
-        if office_q:
-            return True, [office_q, question]
         return heuristic, [question] if heuristic else []
     lines = [line.strip() for line in raw.splitlines() if line.strip()]
     first = lines[0].upper() if lines else ""

@@ -12,6 +12,10 @@ _THOUGHT_PATTERN = re.compile(r"<\|channel>.*?<channel\|>", re.S)
 _CHANNEL_OPEN = "<|channel>"
 _CHANNEL_CLOSE = "<channel|>"
 _MAX_PREAMBLE = 16384
+# Prefilling a closed thinking channel makes the model answer immediately
+# instead of burning 40s+ on its thinking process — used for web-search
+# answers where latency matters and the context already carries the facts.
+_ANSWER_PREFILL = "<|channel>Ok.<channel|>"
 
 
 def _build_prompt(messages: list[dict[str, str]]) -> str:
@@ -90,8 +94,11 @@ class LlamaClient:
         *,
         temperature: float | None = None,
         n_predict: int = 2048,
+        prefill: bool = False,
     ) -> AsyncIterator[str]:
         prompt = _build_prompt(messages)
+        if prefill:
+            prompt += _ANSWER_PREFILL
         payload = {
             "prompt": prompt,
             "n_predict": n_predict,

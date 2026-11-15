@@ -184,10 +184,19 @@ export function inline(text: string): Segment[] {
       const marker = text[index]!
       const end = text.indexOf(marker, index + 1)
       if (end > index + 1) {
-        flush()
-        segments.push({ text: text.slice(index + 1, end), italic: true })
-        index = end + 1
-        continue
+        // CommonMark flanking rule: an emphasis run must not start or end
+        // inside a word (prevents `snake_case_ids` and URLs with `_` from
+        // turning into broken italics).
+        const before = text[index - 1] ?? ""
+        const after = text[end + 1] ?? ""
+        const opens = !before || /[^A-Za-z0-9]/.test(before)
+        const closes = !after || /[^A-Za-z0-9]/.test(after)
+        if (opens && closes) {
+          flush()
+          segments.push({ text: text.slice(index + 1, end), italic: true })
+          index = end + 1
+          continue
+        }
       }
     }
 

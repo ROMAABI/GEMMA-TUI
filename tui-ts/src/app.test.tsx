@@ -240,15 +240,14 @@ function startMock(
         })
       }
       if (path === "/api/research/prepare" && request.method === "POST") {
-        const body = (await request.json()) as { message: string }
+        const body = (await request.json()) as { message: string; deep_read?: boolean }
         prepareCalls.push(body.message)
         if (/latest|breaking/i.test(body.message)) {
           return Response.json({
             search: true,
             query: "gemma latest news",
-            context: "WEB CONTEXT",
             results: [
-              { title: "Gemma release notes", url: "https://ai.google.dev/gemma", engine: "searxng" },
+              { title: "Gemma release notes", url: "https://ai.google.dev/gemma", engine: "searxng", date: "2025-11-01" },
               { title: "Gemma on Wikipedia", url: "https://en.wikipedia.org/wiki/Gemma", engine: "wikipedia" },
             ],
           })
@@ -257,13 +256,26 @@ function startMock(
           return Response.json({
             search: true,
             query: "List of chief ministers of Tamil Nadu",
-            context: "OFFICE CONTEXT",
             results: [
-              { title: "List of chief ministers of Tamil Nadu", url: "https://en.wikipedia.org/wiki/List_of_chief_ministers_of_Tamil_Nadu", engine: "wikipedia" },
+              {
+                title: "List of chief ministers of Tamil Nadu",
+                url: "https://en.wikipedia.org/wiki/List_of_chief_ministers_of_Tamil_Nadu",
+                engine: "wikipedia",
+                date: "2025-11-10",
+              },
             ],
           })
         }
         return Response.json({ search: false })
+      }
+      if (path === "/api/research/read" && request.method === "POST") {
+        const body = (await request.json()) as { query: string; results: Array<{ title: string; date?: string }> }
+        return Response.json({
+          ok: true,
+          query: body.query,
+          context: body.query.includes("Tamil Nadu") ? "OFFICE CONTEXT" : "WEB CONTEXT",
+          results: body.results.map((result) => ({ ...result, excerpt: "page text" })),
+        })
       }
       if (path === "/api/research/test" && request.method === "POST") {
         const body = (await request.json()) as { query: string }
@@ -769,8 +781,9 @@ describe("OpenTUI client", () => {
     const last = chat.activeSession()?.messages.at(-1)
     expect(last?.search?.status).toBe("ok")
     expect(last?.search?.sources?.[0]?.domain).toBe("en.wikipedia.org")
+    expect(last?.search?.sources?.[0]?.date).toBe("2025-11-10")
     const frame = await setup.waitForFrame((text: string) =>
-      text.includes("List of chief ministers of Tamil Nadu — en.wikipedia.org"),
+      text.includes("List of chief ministers of Tamil Nadu — en.wikipedia.org · 2025-11-10"),
     )
     expect(frame).toContain("sources · 1")
   })

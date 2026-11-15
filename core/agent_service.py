@@ -335,6 +335,14 @@ class AgentRuntime:
                 extra_context=context,
             )
             messages = self.store.context_messages(run.session_id)
+            # Prime the model's prompt cache with the (large) agent prefix so
+            # the first streaming step doesn't re-prefill it from scratch.
+            warmup = getattr(orchestrator, "warmup", None)
+            if callable(warmup):
+                try:
+                    await warmup()
+                except Exception:  # noqa: BLE001 - warmup must never break a run
+                    pass
             async for event in orchestrator.run(messages):
                 if run.aborted:
                     break

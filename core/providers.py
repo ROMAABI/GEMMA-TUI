@@ -168,6 +168,14 @@ class NativeToolProvider:
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
+        # Web-search context makes the model run a long thinking process
+        # before the first visible token; on the local llama-server that
+        # costs minutes. Ask it to skip reasoning for those turns.
+        if any(
+            "### Web search results" in str(message.get("content") or "")
+            for message in messages
+        ):
+            payload["reasoning_budget"] = 0
         return payload
 
     async def warmup(
@@ -377,7 +385,16 @@ class PromptToolProvider:
         converted = self._convert_messages(messages)
         buffer = ""
         try:
-            async for chunk in self.client.stream_chat(converted, temperature=temperature):
+            # Web-search context makes the model think at length before
+            # answering; prefill a closed thinking channel there so replies
+            # stream right away.
+            prefill = any(
+                "### Web search results" in str(message.get("content") or "")
+                for message in messages
+            )
+            async for chunk in self.client.stream_chat(
+                converted, temperature=temperature, prefill=prefill
+            ):
                 buffer += chunk
                 yield ProviderEvent("text", text=chunk)
         except Exception as exc:  # noqa: BLE001
