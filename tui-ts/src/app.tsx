@@ -583,6 +583,16 @@ export function App(props: { chat: Chat }) {
       case "/compact":
         void props.chat.compactChat(arg)
         return true
+      case "/search": {
+        // Quick toggle for auto web search (same signal /websearch sets).
+        if (arg === "on" || arg === "off") {
+          props.chat.setWebsearch(arg === "on")
+          flash(`Web search: ${arg.toUpperCase()}`)
+          return true
+        }
+        flash(`Web search: ${props.chat.websearch() ? "ON" : "OFF"} — usage /search on|off`)
+        return true
+      }
       case "/websearch": {
         const [first, ...rest] = arg.split(/\s+/).filter(Boolean)
         const value = rest.join(" ")

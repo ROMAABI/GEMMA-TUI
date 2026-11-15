@@ -114,6 +114,7 @@ class AgentOrchestrator:
         tool_timeout: int | None = None,
         compactor: Compactor | None = None,
         skills: Any = None,
+        extra_context: str = "",
     ) -> None:
         if client is None:
             if settings is None:
@@ -213,6 +214,9 @@ class AgentOrchestrator:
             self.registry.prompt_catalog(),
             skills_summary,
         )
+        if extra_context.strip():
+            # Web research context rides into the agent's system prompt.
+            self.system_prompt = f"{self.system_prompt}\n\n{extra_context.strip()}"
         self._permission_lock = asyncio.Lock()
 
     # ── Conversation preparation ────────────────────────────────────────

@@ -42,6 +42,14 @@ export interface Message {
   ttft?: number
   stopped?: boolean
   error?: string
+  /** Web-search state for this turn: status line while running, sources after. */
+  search?: SearchState
+}
+
+export interface SearchState {
+  status: "searching" | "ok" | "failed"
+  sources?: Array<{ title: string; domain: string }>
+  error?: string
 }
 
 export interface Session {
@@ -59,9 +67,16 @@ export interface Metrics {
   tokPerSec: number
   provider: string
   temperature: number
+  websearch: boolean
 }
 
+// Greetings never need a web-search decision; skipping it avoids a pointless
+// round-trip. Ported from tui/app.py's _SMALLTALK_RE.
+const SMALLTALK_RE =
+  /^(hi|hey|hello|yo|sup|hiya)(\s+(gemma|there|bot|assistant|friend))?[\s!.,?]*$|^(thanks|thank you|thx|ok|okay|good (morning|afternoon|evening|night)|how are you|how's it going|what'?s up|bye|goodbye)[\s!.,?]*$/i
+
 let counter = 0
+
 function nextId(prefix: string): string {
   counter += 1
   return `${prefix}${Date.now().toString(36)}${counter.toString(36)}`
@@ -154,7 +169,8 @@ export function createChat(client: GemmaClient) {
   const [providers, setProviders] = createSignal<ProviderCatalog | null>(null)
   const [commands, setCommands] = createSignal<CommandDef[]>([])
   const [notice, setNoticeSignal] = createSignal<string | null>(null)
-  const [websearch, setWebsearchSignal] = createSignal(false)
+  // Web search defaults ON, like the classic TUI (websearch_enabled = True).
+  const [websearch, setWebsearchSignal] = createSignal(true)
   const [connected, setConnected] = createSignal<boolean | null>(null)
   const [permission, setPermission] = createSignal<AgentEvent | null>(null)
   const [runId, setRunId] = createSignal<string | null>(null)
@@ -607,6 +623,57 @@ export function createChat(client: GemmaClient) {
     }))
   }
 
+  function domainOf(url: string): string {
+    try {
+      return new URL(url).hostname.replace(/^www\./, "")
+    } catch {
+      return url
+    }
+  }
+
+  /**
+   * Judge + fetch web context for a turn. Reflects progress on the assistant
+   * message itself: "✦ Searching the web…" while running, then either the
+   * sources used or a clear failure line (never a silent memory answer).
+   */
+  async function prepareSearch(
+    sessionId: string,
+    assistantId: string,
+    raw: string,
+  ): Promise<{ context?: string; sources?: Array<{ title: string; domain: string }> }> {
+    const mark = (search: SearchState | undefined) =>
+      patchMessage(sessionId, assistantId, (message) => ({ ...message, search }))
+
+    // Greetings/chit-chat never search (same gate as the classic TUI).
+    if (SMALLTALK_RE.test(raw.trim())) {
+      mark(undefined)
+      return {}
+    }
+
+    mark({ status: "searching" })
+    try {
+      const prep = await client.researchPrepare(raw)
+      if (!prep.search) {
+        mark(undefined)
+        return {}
+      }
+      const sources = (prep.results ?? []).map((result) => ({
+        title: result.title ?? "",
+        domain: domainOf(result.url ?? ""),
+      }))
+      if (prep.context && sources.length > 0) {
+        mark({ status: "ok", sources })
+        return { context: prep.context, sources }
+      }
+      const detail = prep.detail ?? "no results"
+      mark({ status: "failed", error: detail })
+      return {}
+    } catch (error) {
+      mark({ status: "failed", error: error instanceof Error ? error.message : String(error) })
+      return {}
+    }
+  }
+
   async function sendChat(raw: string): Promise<void> {
     const turn = await startTurn(raw)
     if (!turn) return
@@ -616,18 +683,13 @@ export function createChat(client: GemmaClient) {
     let content = ""
     const statsBox: { value: DoneStats | null } = { value: null }
 
-    // Optional web research: the server judges the question and fetches
-    // SearXNG context, which rides into /api/chat as a system message.
+    // Web research: the server judges the question (with the same heuristics
+    // as the classic TUI) and fetches SearXNG context, which rides into the
+    // request as a system message. Sources show under the answer.
     let context: string | undefined
     if (websearch()) {
-      setNotice("✦ Searching the web…")
-      try {
-        const prep = await client.researchPrepare(raw.trim())
-        if (prep.search && prep.context) context = prep.context
-        if (prep.search && !prep.context) setNotice("No web results — answering from the model")
-      } catch (error) {
-        setNotice(error instanceof Error ? error.message : String(error))
-      }
+      const prep = await prepareSearch(sessionId, assistantId, raw.trim())
+      context = prep.context
     }
 
     try {
@@ -684,6 +746,14 @@ export function createChat(client: GemmaClient) {
     let stopped = false
     let failure: string | null = null
     let currentRun = ""
+
+    // Web research rides into the agent run as extra system context, so tool
+    // work still happens but facts come from the fresh results.
+    let context: string | undefined
+    if (websearch()) {
+      const prep = await prepareSearch(sessionId, assistantId, raw.trim())
+      context = prep.context
+    }
 
     const update = (patch: (message: Message) => Message) =>
       patchMessage(sessionId, assistantId, patch)
@@ -798,6 +868,7 @@ export function createChat(client: GemmaClient) {
           },
         },
         controller?.signal,
+        context,
       )
 
       const elapsed = (performance.now() - startedAt) / 1000
@@ -865,6 +936,7 @@ export function createChat(client: GemmaClient) {
         tokPerSec: ttft > 0 ? tokens / Math.max(elapsed - ttft, 0.001) : 0,
         provider,
         temperature,
+        websearch: websearch(),
       }
     }
 
@@ -872,7 +944,16 @@ export function createChat(client: GemmaClient) {
       .reverse()
       .find((message) => message.role === "assistant" && typeof message.elapsed === "number")
     if (!lastAssistant) {
-      return { contextUsed, contextMax, tokens: 0, elapsed: 0, tokPerSec: 0, provider, temperature }
+      return {
+        contextUsed,
+        contextMax,
+        tokens: 0,
+        elapsed: 0,
+        tokPerSec: 0,
+        provider,
+        temperature,
+        websearch: websearch(),
+      }
     }
     const elapsed = lastAssistant.elapsed ?? 0
     const ttft = lastAssistant.ttft ?? 0
@@ -885,6 +966,7 @@ export function createChat(client: GemmaClient) {
       tokPerSec: elapsed > ttft ? tokens / (elapsed - ttft) : 0,
       provider,
       temperature,
+      websearch: websearch(),
     }
   })
 

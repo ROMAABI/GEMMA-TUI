@@ -11,6 +11,7 @@ export function StatusBar(props: { metrics: Metrics; width: number; version?: st
     const m = props.metrics
     const parts = [`ctx ${formatNumber(m.contextUsed)}/${formatNumber(m.contextMax)}`]
     if (m.tokPerSec > 0) parts.push(`${m.tokPerSec.toFixed(1)} tok/s`)
+    parts.push(`web ${m.websearch ? "on" : "off"}`)
     return parts.join(" · ")
   }
 

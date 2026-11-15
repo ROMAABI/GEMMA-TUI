@@ -80,6 +80,42 @@ function ReasoningBlock(props: { text: string }) {
   )
 }
 
+/** Web-search status for the turn: running line, failure line, or sources. */
+function SearchBlock(props: { search: NonNullable<Message["search"]>; accent: ColorInput }) {
+  return (
+    <Switch>
+      <Match when={props.search.status === "searching"}>
+        <box flexDirection="row" height={1} gap={1} marginTop={1}>
+          <text style={{ fg: props.accent }}>✦</text>
+          <text style={{ fg: colors().muted }}>Searching the web…</text>
+        </box>
+      </Match>
+      <Match when={props.search.status === "failed"}>
+        <box flexDirection="row" height={1} gap={1} marginTop={1}>
+          <text style={{ fg: colors().danger }}>⚠</text>
+          <text style={{ fg: colors().danger }} truncate>
+            {`Web search failed: ${props.search.error ?? "unavailable"} — answering from model memory`}
+          </text>
+        </box>
+      </Match>
+      <Match when={props.search.status === "ok"}>
+        <box flexDirection="column" flexShrink={0} marginTop={1} border={["left"]} borderColor={colors().border} paddingLeft={1}>
+          <text style={{ fg: colors().faint }} height={1}>
+            {`sources · ${props.search.sources?.length ?? 0}`}
+          </text>
+          <For each={props.search.sources ?? []}>
+            {(source, index) => (
+              <text style={{ fg: colors().muted }} truncate>
+                {`${index() + 1}. ${source.title || source.domain} — ${source.domain}`}
+              </text>
+            )}
+          </For>
+        </box>
+      </Match>
+    </Switch>
+  )
+}
+
 /** One transcript entry, OpenCode style: user blocks are tinted, replies are plain. */
 export function MessageCard(props: {
   message: Message
@@ -131,6 +167,10 @@ export function MessageCard(props: {
                 </Switch>
               )}
             </For>
+
+            <Show when={props.message.search}>
+              <SearchBlock search={props.message.search!} accent={props.accent} />
+            </Show>
 
             <Show when={props.message.error}>
               <text style={{ fg: colors().danger }} marginTop={1}>

@@ -540,6 +540,7 @@ class _Handler(BaseHTTPRequestHandler):
         session_id = str(body.get("session_id") or "").strip()
         if not session_id or self.gemma.store.get_session(session_id) is None:
             session_id = self.gemma.store.create_session()
+        context = str(body.get("context") or "").strip()
 
         self.close_connection = True
         self.send_response(200)
@@ -550,7 +551,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.emit({"type": "start", "session_id": session_id})
         try:
-            run = self.gemma.agent.start(session_id, message)
+            run = self.gemma.agent.start(session_id, message, context=context)
             self.emit({"type": "run", "run_id": run.run_id, "session_id": session_id})
             self._drain(run)
         except (BrokenPipeError, ConnectionResetError):
@@ -758,7 +759,7 @@ class _Handler(BaseHTTPRequestHandler):
 
         async def run() -> dict[str, Any]:
             from core.orchestrator import decide_search
-            from core.research import search_context
+            from core.research import format_context, web_search
 
             settings = self.gemma.settings
             client = LlamaClient(settings)
@@ -768,21 +769,40 @@ class _Handler(BaseHTTPRequestHandler):
             started = time.monotonic()
             for query in queries:
                 try:
-                    context = await search_context(
+                    results = await web_search(
                         query,
                         searxng_url=settings.searxng_url,
                         deep_read=settings.searxng_deep_read,
                     )
                 except Exception:  # noqa: BLE001 - fall through to the next query
-                    context = ""
-                if context:
+                    results = []
+                if results:
                     return {
                         "search": True,
                         "query": query,
-                        "context": context,
+                        "context": format_context(results),
+                        "results": [
+                            {
+                                "title": str(item.get("title") or ""),
+                                "url": str(item.get("url") or ""),
+                                "engine": str(item.get("engine") or ""),
+                            }
+                            for item in results
+                        ],
                         "elapsed": round(time.monotonic() - started, 3),
                     }
-            return {"search": True, "query": queries[0] if queries else "", "context": ""}
+            # Every query came back empty: tell the client why, so it can show
+            # a clear error instead of silently answering from memory.
+            from core.research import check_searxng_health
+
+            healthy, detail = await check_searxng_health(settings.searxng_url)
+            return {
+                "search": True,
+                "query": queries[0] if queries else "",
+                "results": [],
+                "healthy": healthy,
+                "detail": detail,
+            }
 
         self._json(asyncio.run(run()))
 

@@ -80,7 +80,8 @@ function sseResponse(events: string[]): Response {
 interface MockServer {
   base: string
   chatRequests: Array<{ session_id: string; message: string; context?: string }>
-  agentRequests: Array<{ session_id: string; message: string }>
+  agentRequests: Array<{ session_id: string; message: string; context?: string }>
+  prepareCalls: string[]
   modeRequests: string[]
   providerModes: string[]
   contextLimits: number[]
@@ -94,7 +95,8 @@ function startMock(
   options: { mode?: "chat" | "agent" } = {},
 ): MockServer {
   const chatRequests: Array<{ session_id: string; message: string; context?: string }> = []
-  const agentRequests: Array<{ session_id: string; message: string }> = []
+  const agentRequests: Array<{ session_id: string; message: string; context?: string }> = []
+  const prepareCalls: string[] = []
   const modeRequests: string[] = []
   const encoder = new TextEncoder()
   let permissionStream: ReadableStreamDefaultController<Uint8Array> | null = null
@@ -239,14 +241,26 @@ function startMock(
       }
       if (path === "/api/research/prepare" && request.method === "POST") {
         const body = (await request.json()) as { message: string }
-        if (/^(hi|hey|hello)\b/i.test(body.message)) {
-          return Response.json({ search: false, reason: "smalltalk" })
-        }
+        prepareCalls.push(body.message)
         if (/latest|breaking/i.test(body.message)) {
           return Response.json({
             search: true,
             query: "gemma latest news",
             context: "WEB CONTEXT",
+            results: [
+              { title: "Gemma release notes", url: "https://ai.google.dev/gemma", engine: "searxng" },
+              { title: "Gemma on Wikipedia", url: "https://en.wikipedia.org/wiki/Gemma", engine: "wikipedia" },
+            ],
+          })
+        }
+        if (/chief minister|cm of/i.test(body.message)) {
+          return Response.json({
+            search: true,
+            query: "List of chief ministers of Tamil Nadu",
+            context: "OFFICE CONTEXT",
+            results: [
+              { title: "List of chief ministers of Tamil Nadu", url: "https://en.wikipedia.org/wiki/List_of_chief_ministers_of_Tamil_Nadu", engine: "wikipedia" },
+            ],
           })
         }
         return Response.json({ search: false })
@@ -294,7 +308,7 @@ function startMock(
       }
 
       if (path === "/api/agent" && request.method === "POST") {
-        const body = (await request.json()) as { session_id: string; message: string }
+        const body = (await request.json()) as { session_id: string; message: string; context?: string }
         agentRequests.push(body)
         // Keep the stream open: the permission prompt is answered out of band.
         const stream = new ReadableStream<Uint8Array>({
@@ -361,6 +375,7 @@ function startMock(
     base: `http://127.0.0.1:${server.port}`,
     chatRequests,
     agentRequests,
+    prepareCalls,
     modeRequests,
     providerModes,
     contextLimits,
@@ -675,14 +690,10 @@ describe("OpenTUI client", () => {
     const { setup } = await mount(current)
     setupRef = setup
 
+    // Search defaults ON, like the classic TUI.
     setup.mockInput.typeText("/websearch status")
     setup.mockInput.pressEnter()
-    await setup.waitForFrame((text: string) => text.includes("Web search OFF"))
-    expect(current.chatRequests.every((r) => !r.context)).toBe(true)
-
-    setup.mockInput.typeText("/websearch on")
-    setup.mockInput.pressEnter()
-    await setup.waitForFrame((text: string) => text.includes("Web search: ON"))
+    await setup.waitForFrame((text: string) => text.includes("Web search ON"))
 
     setup.mockInput.typeText("latest gemma news")
     setup.mockInput.pressEnter()
@@ -705,6 +716,83 @@ describe("OpenTUI client", () => {
     setup.mockInput.typeText("/websearch url http://127.0.0.1:9999")
     setup.mockInput.pressEnter()
     await setup.waitForFrame((text: string) => text.includes("SearXNG URL: http://127.0.0.1:9999"))
+  })
+
+  test("/search toggles auto search and the status bar shows the state", async () => {
+    current = startMock()
+    const { setup, chat } = await mount(current)
+    setupRef = setup
+
+    expect(chat.websearch()).toBe(true)
+    setup.mockInput.typeText("/search")
+    setup.mockInput.pressEnter()
+    await setup.waitForFrame((text: string) => text.includes("Web search: ON"))
+
+    setup.mockInput.typeText("/search off")
+    setup.mockInput.pressEnter()
+    await setup.waitForFrame((text: string) => text.includes("Web search: OFF"))
+    expect(chat.websearch()).toBe(false)
+    expect((await setup.renderOnce(), setup.captureCharFrame())).toContain("web off")
+
+    setup.mockInput.typeText("/search on")
+    setup.mockInput.pressEnter()
+    await setup.waitForFrame((text: string) => text.includes("Web search: ON"))
+    expect((await setup.renderOnce(), setup.captureCharFrame())).toContain("web on")
+  })
+
+  test("auto search skips smalltalk and searches office questions with sources", async () => {
+    current = startMock()
+    const { setup, chat } = await mount(current)
+    setupRef = setup
+
+    // "hi" must not even ask the search judge.
+    setup.mockInput.typeText("hi")
+    setup.mockInput.pressEnter()
+    await setup.waitForFrame((text: string) => text.includes("Hello from the mock"))
+    // The stats footer only renders once the turn has fully finished.
+    await setup.waitForFrame((text: string) => text.includes("⚡"))
+    expect(current.prepareCalls).toEqual([])
+
+    // "write a python loop" asks the server judge, which says no.
+    setup.mockInput.typeText("write a python loop")
+    setup.mockInput.pressEnter()
+    await setup.waitForFrame((text: string) => text.includes("write a python loop") && text.split("⚡").length > 2)
+    expect(current.prepareCalls).toEqual(["write a python loop"])
+    expect(current.chatRequests.every((request) => !request.context)).toBe(true)
+
+    // "who is the cm of tamil nadu" searches and shows its sources.
+    setup.mockInput.typeText("who is the cm of tamil nadu")
+    setup.mockInput.pressEnter()
+    await setup.waitForFrame((text: string) => text.includes("Hello from the mock") && text.includes("cm of tamil nadu") && text.split("⚡").length > 3)
+    expect(current.prepareCalls[1]).toBe("who is the cm of tamil nadu")
+    expect(current.chatRequests.at(-1)?.context).toBe("OFFICE CONTEXT")
+    const last = chat.activeSession()?.messages.at(-1)
+    expect(last?.search?.status).toBe("ok")
+    expect(last?.search?.sources?.[0]?.domain).toBe("en.wikipedia.org")
+    const frame = await setup.waitForFrame((text: string) =>
+      text.includes("List of chief ministers of Tamil Nadu — en.wikipedia.org"),
+    )
+    expect(frame).toContain("sources · 1")
+  })
+
+  test("agent mode injects web context too", async () => {
+    current = startMock()
+    const { setup, chat } = await mount(current)
+    setupRef = setup
+
+    setup.mockInput.pressTab()
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    await setup.renderOnce()
+
+    setup.mockInput.typeText("latest gemma news")
+    setup.mockInput.pressEnter()
+    // The agent request is recorded as soon as the SSE call opens; the mock
+    // keeps the stream open, so don't wait for a reply.
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    await setup.renderOnce()
+    expect(current.agentRequests[0]?.context).toBe("WEB CONTEXT")
+    const last = chat.activeSession()?.messages.at(-1)
+    expect(last?.search?.status).toBe("ok")
   })
 
   test("/init writes the starter AGENTS.md", async () => {

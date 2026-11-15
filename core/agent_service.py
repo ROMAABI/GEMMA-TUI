@@ -307,17 +307,17 @@ class AgentRuntime:
             session_id=session_id,
         )
 
-    def start(self, session_id: str, message: str) -> AgentRun:
+    def start(self, session_id: str, message: str, context: str = "") -> AgentRun:
         """Persist the user turn and launch an agent run; drain ``run.events``."""
         if message.strip():
             self.store.add_message(session_id, "user", message)
         run = AgentRun(run_id=secrets.token_urlsafe(9), session_id=session_id)
         with self._lock:
             self._runs[run.run_id] = run
-        run.future = self._submit(self._execute(run))
+        run.future = self._submit(self._execute(run, context))
         return run
 
-    async def _execute(self, run: AgentRun) -> None:
+    async def _execute(self, run: AgentRun, context: str = "") -> None:
         token = _CURRENT_RUN.set(run)
         try:
             registry = await self._ensure_integrations()
@@ -332,6 +332,7 @@ class AgentRuntime:
                 session_id=run.session_id,
                 skills=self._skills,
                 provider_mode=getattr(self.settings, "provider", "auto"),
+                extra_context=context,
             )
             messages = self.store.context_messages(run.session_id)
             async for event in orchestrator.run(messages):

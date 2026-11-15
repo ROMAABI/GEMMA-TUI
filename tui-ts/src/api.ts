@@ -86,6 +86,11 @@ export interface ResearchPrepare {
   query?: string
   context?: string
   elapsed?: number
+  /** Top results, for showing sources under the answer. */
+  results?: ResearchResult[]
+  /** Present (with results: []) when every query failed. */
+  healthy?: boolean
+  detail?: string
 }
 
 export interface ResearchStatus {
@@ -459,11 +464,12 @@ export class GemmaClient {
       onEvent: (event: AgentEvent) => void
     },
     signal?: AbortSignal,
+    context?: string,
   ): Promise<void> {
     const response = await fetch(`${this.base}/api/agent`, {
       method: "POST",
       headers: this.headers({ Accept: "text/event-stream" }),
-      body: JSON.stringify({ session_id: sessionId, message }),
+      body: JSON.stringify(context ? { session_id: sessionId, message, context } : { session_id: sessionId, message }),
       signal,
     })
     if (response.status === 401) throw new PairingError("Pairing required.")

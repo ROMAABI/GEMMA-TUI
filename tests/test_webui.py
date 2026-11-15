@@ -364,6 +364,33 @@ def test_agent_stream_round_trips_permission(web, monkeypatch: pytest.MonkeyPatc
         assert server.store.messages(session_id)[0]["content"] == "write a file"
 
 
+def test_agent_stream_injects_web_context(web, monkeypatch: pytest.MonkeyPatch) -> None:
+    server, base, _store = web
+    import core.agent_service as agent_service
+    from core.agent import AgentEvent
+
+    seen_kwargs: list[dict] = []
+
+    class RecordingOrchestrator:
+        def __init__(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
+            seen_kwargs.append(kwargs)
+
+        async def run(self, messages):  # type: ignore[no-untyped-def]
+            yield AgentEvent("complete", "ok")
+
+    monkeypatch.setattr(agent_service, "AgentOrchestrator", RecordingOrchestrator)
+
+    with _paired_client(base, server) as client:
+        session_id = client.post("/api/sessions").json()["id"]
+        response = client.post(
+            "/api/agent",
+            json={"session_id": session_id, "message": "latest news?", "context": "WEB CONTEXT"},
+        )
+        assert response.status_code == 200
+
+        assert seen_kwargs[0]["extra_context"] == "WEB CONTEXT"
+
+
 def test_unknown_permission_and_abort(web) -> None:
     server, base, _store = web
     with _paired_client(base, server) as client:
@@ -457,11 +484,16 @@ def test_research_endpoints(web, monkeypatch: pytest.MonkeyPatch) -> None:
         async def fake_decide(question, llm):  # type: ignore[no-untyped-def]
             return True, ["latest gemma news", question]
 
-        async def fake_context(query, **kwargs):  # type: ignore[no-untyped-def]
-            return f"WEB CONTEXT for {query}"
+        def fake_search(query, **kwargs):  # type: ignore[no-untyped-def]
+            return [
+                {"title": "Gemma release notes", "url": "https://example.com/gemma", "engine": "searxng"},
+            ]
+
+        async def async_search(query, **kwargs):  # type: ignore[no-untyped-def]
+            return fake_search(query, **kwargs)
 
         monkeypatch.setattr("core.orchestrator.decide_search", fake_decide)
-        monkeypatch.setattr("core.research.search_context", fake_context)
+        monkeypatch.setattr("core.research.web_search", async_search)
 
         prep = client.post(
             "/api/research/prepare", json={"message": "what is the latest gemma news?"}
@@ -470,15 +502,28 @@ def test_research_endpoints(web, monkeypatch: pytest.MonkeyPatch) -> None:
         data = prep.json()
         assert data["search"] is True
         assert data["query"] == "latest gemma news"
-        assert data["context"] == "WEB CONTEXT for latest gemma news"
+        assert "WEB search results" in data["context"] or "### Web search results" in data["context"]
+        assert data["results"] == [
+            {"title": "Gemma release notes", "url": "https://example.com/gemma", "engine": "searxng"}
+        ]
 
-        # Nothing found → search stays true with empty context.
-        async def empty_context(query, **kwargs):  # type: ignore[no-untyped-def]
-            return ""
+        # Nothing found → search stays true, but the failure is explicit.
+        async def empty_search(query, **kwargs):  # type: ignore[no-untyped-def]
+            return []
 
-        monkeypatch.setattr("core.research.search_context", empty_context)
+        async def fake_health(base_url):  # type: ignore[no-untyped-def]
+            return False, "Connection refused"
+
+        monkeypatch.setattr("core.research.web_search", empty_search)
+        monkeypatch.setattr("core.research.check_searxng_health", fake_health)
         empty = client.post("/api/research/prepare", json={"message": "breaking news now"})
-        assert empty.json() == {"search": True, "query": "latest gemma news", "context": ""}
+        assert empty.json() == {
+            "search": True,
+            "query": "latest gemma news",
+            "results": [],
+            "healthy": False,
+            "detail": "Connection refused",
+        }
 
         # Web context rides into the chat messages after the system prompt.
         messages = server.build_messages("any", "CTX")
