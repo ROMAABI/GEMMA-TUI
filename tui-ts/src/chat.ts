@@ -155,6 +155,7 @@ export function createChat(client: GemmaClient) {
   const [commands, setCommands] = createSignal<CommandDef[]>([])
   const [notice, setNoticeSignal] = createSignal<string | null>(null)
   const [websearch, setWebsearchSignal] = createSignal(false)
+  const [connected, setConnected] = createSignal<boolean | null>(null)
   const [permission, setPermission] = createSignal<AgentEvent | null>(null)
   const [runId, setRunId] = createSignal<string | null>(null)
   const [live, setLive] = createSignal<{ tokens: number; elapsed: number; ttft: number }>({
@@ -202,6 +203,18 @@ export function createChat(client: GemmaClient) {
   }
 
   /** Load the server's sessions, newest first. */
+  /** Ping /health so the header dot reflects the connection. Runs every 30s. */
+  async function pollHealth(): Promise<void> {
+    try {
+      await client.health()
+      setConnected(true)
+    } catch {
+      setConnected(false)
+    }
+  }
+  void pollHealth()
+  setInterval(() => void pollHealth(), 30_000)
+
   async function load(): Promise<void> {
     const serverInfo = await client.info()
     setInfo(serverInfo)
@@ -912,6 +925,7 @@ export function createChat(client: GemmaClient) {
     websearch,
     setWebsearch,
     toggleWebsearch,
+    connected,
     compactChat,
     send,
     stop,

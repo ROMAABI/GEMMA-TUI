@@ -288,6 +288,7 @@ const KEYS: Array<[string, string]> = [
   ["Enter", "send message"],
   ["Shift+Enter", "new line"],
   ["Tab", "switch chat / agent"],
+  ["Delete", "delete current session"],
   ["Ctrl+X N", "new session"],
   ["Ctrl+X L", "session list"],
   ["Ctrl+X M", "model picker"],
@@ -304,8 +305,71 @@ const KEYS: Array<[string, string]> = [
   ["Esc", "focus the prompt"],
 ]
 
-export function HelpOverlay(props: { commands: CommandDef[]; accent: ResolvedTheme; onClose: () => void }) {
+/** Settings launcher: rows that open the matching overlay or toggle in place. */
+export function SettingsOverlay(props: {
+  mode: string
+  accent: ResolvedTheme
+  onPick: (row: "model" | "theme" | "mode" | "permissions") => void
+  onClose: () => void
+}) {
+  const rows: Array<{ id: "model" | "theme" | "mode" | "permissions"; label: string; value: string }> = [
+    { id: "model", label: "Model", value: "picker" },
+    { id: "theme", label: "Theme", value: "picker" },
+    { id: "mode", label: "Mode", value: props.mode === "agent" ? "agent" : "chat" },
+    { id: "permissions", label: "Permissions", value: "status" },
+  ]
+  const [selected, setSelected] = createSignal(0)
+
   useKeyboard((key) => {
+    if (key.name === "escape") {
+      key.preventDefault()
+      props.onClose()
+      return
+    }
+    if (key.name === "up") {
+      key.preventDefault()
+      setSelected((index) => (index + rows.length - 1) % rows.length)
+      return
+    }
+    if (key.name === "down") {
+      key.preventDefault()
+      setSelected((index) => (index + 1) % rows.length)
+      return
+    }
+    if (key.name === "return" || key.name === "kpenter") {
+      key.preventDefault()
+      props.onPick(rows[selected()]?.id ?? "model")
+    }
+  })
+
+  return (
+    <Frame title="Settings" accent={props.accent} width={44} height={9}>
+      <For each={rows}>
+        {(row, index) => (
+          <box
+            flexDirection="row"
+            height={1}
+            backgroundColor={selected() === index() ? colors().element : colors().panel}
+            paddingLeft={1}
+            paddingRight={1}
+            onMouseDown={() => props.onPick(row.id)}
+            onMouseOver={() => setSelected(index())}
+          >
+            <text style={{ fg: selected() === index() ? colors().text : colors().dim }} flexGrow={1}>
+              {row.label}
+            </text>
+            <text style={{ fg: colors().faint }}>{row.value}</text>
+          </box>
+        )}
+      </For>
+      <text style={{ fg: colors().faint }} height={1}>
+        ↑↓ select · Enter open · Esc close
+      </text>
+    </Frame>
+  )
+}
+
+export function HelpOverlay(props: { commands: CommandDef[]; accent: ResolvedTheme; onClose: () => void }) {  useKeyboard((key) => {
     if (key.name === "escape" || key.name === "return" || key.name === "kpenter" || key.name === "q") {
       key.preventDefault()
       props.onClose()

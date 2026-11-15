@@ -227,6 +227,11 @@ export class GemmaClient {
     return this.json<ServerInfo>("/api/info")
   }
 
+  /** Liveness probe (the header connection dot polls this). */
+  health(): Promise<{ status: string; app: string }> {
+    return this.json("/health")
+  }
+
   sessions(): Promise<SessionMeta[]> {
     return this.json<{ sessions: SessionMeta[] }>("/api/sessions").then((data) => data.sessions ?? [])
   }

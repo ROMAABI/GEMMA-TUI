@@ -17,6 +17,7 @@ export function Sidebar(props: {
   streaming: boolean
   onNew: () => void
   onSelect: (id: string) => void
+  onSettings: () => void
 }) {
   const dims = useTerminalDimensions()
   const listHeight = createMemo(() => Math.max(3, dims().height - 13))
@@ -112,7 +113,9 @@ export function Sidebar(props: {
         </box>
         <box flexDirection="row" height={1} justifyContent="space-between">
           <text style={{ fg: colors().faint }}>local · offline</text>
-          <text style={{ fg: colors().faint }}>⚙</text>
+          <text style={{ fg: colors().muted }} onMouseDown={props.onSettings}>
+            ⚙
+          </text>
         </box>
       </box>
     </box>

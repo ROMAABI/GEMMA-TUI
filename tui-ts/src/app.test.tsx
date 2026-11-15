@@ -124,6 +124,7 @@ function startMock(
       const path = url.pathname
 
       if (path === "/api/info") return Response.json(info)
+      if (path === "/health") return Response.json({ status: "ok", app: "gemma" })
       if (path === "/api/sessions" && request.method === "GET") {
         return Response.json({ sessions: [{ id: "s1", title: "First chat", updated_at: NOW, message_count: 0 }] })
       }
@@ -714,6 +715,25 @@ describe("OpenTUI client", () => {
     setup.mockInput.typeText("/init")
     setup.mockInput.pressEnter()
     await setup.waitForFrame((text: string) => text.includes("AGENTS.md created at /workspace/AGENTS.md"))
+  })
+
+  test("polls /health so the header dot knows the connection", async () => {
+    current = startMock()
+    const { chat } = await mount(current)
+    expect(chat.connected()).toBe(true)
+  })
+
+  test("Delete removes the active session", async () => {
+    current = startMock()
+    const { setup, chat } = await mount(current)
+    expect(chat.sessions().some((session) => session.id === "s1")).toBe(true)
+
+    setup.mockInput.pressKey("DELETE")
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    await setup.renderOnce()
+
+    expect(chat.sessions().some((session) => session.id === "s1")).toBe(false)
+    expect(chat.activeId()).not.toBe("s1")
   })
 
   test("/compact folds the session into a checkpoint", async () => {

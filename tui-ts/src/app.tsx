@@ -15,6 +15,7 @@ import {
   HelpOverlay,
   RenameOverlay,
   ThemePicker,
+  SettingsOverlay,
   PermissionOverlay,
 } from "./components/overlays"
 
@@ -23,6 +24,7 @@ type Overlay =
   | { kind: "model" }
   | { kind: "theme" }
   | { kind: "help" }
+  | { kind: "settings" }
   | { kind: "rename"; initial: string }
 
 export function App(props: { chat: Chat }) {
@@ -282,6 +284,12 @@ export function App(props: { chat: Chat }) {
     if (name === "f1" || (ctrl && name === "h")) {
       key.preventDefault()
       setOverlay({ kind: "help" })
+      return
+    }
+
+    if (name === "delete") {
+      key.preventDefault()
+      deleteActive()
       return
     }
 
@@ -691,6 +699,7 @@ export function App(props: { chat: Chat }) {
             streaming={streaming()}
             onNew={() => void props.chat.newChat()}
             onSelect={(id) => props.chat.select(id)}
+            onSettings={() => setOverlay({ kind: "settings" })}
           />
         </Show>
 
@@ -703,6 +712,7 @@ export function App(props: { chat: Chat }) {
             title={activeSession()?.title ?? "New session"}
             model={info()?.model ?? ""}
             width={contentWidth()}
+            dot={() => props.chat.connected()}
           />
 
           <Show when={notice()}>
@@ -770,6 +780,38 @@ export function App(props: { chat: Chat }) {
           accent={accent()}
           onSelect={setAccent}
           onMode={setMode}
+          onClose={() => setOverlay(null)}
+        />
+      </Show>
+      <Show when={overlay()?.kind === "settings"}>
+        <SettingsOverlay
+          mode={info()?.mode ?? "chat"}
+          accent={accent()}
+          onPick={(row) => {
+            if (row === "model") {
+              setOverlay({ kind: "model" })
+              return
+            }
+            if (row === "theme") {
+              setOverlay({ kind: "theme" })
+              return
+            }
+            if (row === "mode") {
+              setOverlay(null)
+              props.chat.toggleMode()
+              return
+            }
+            setOverlay(null)
+            void (async () => {
+              try {
+                const config = await props.chat.client.permissionConfig()
+                const last = config.rules[config.rules.length - 1] ?? "none"
+                flash(`Permission mode: ${config.mode} · ${config.rules.length} user rules · last: ${last}`)
+              } catch (error) {
+                flash(error instanceof Error ? error.message : String(error))
+              }
+            })()
+          }}
           onClose={() => setOverlay(null)}
         />
       </Show>
