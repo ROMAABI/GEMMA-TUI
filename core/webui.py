@@ -382,6 +382,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._research_test()
         elif path == "/api/research/config":
             self._research_config()
+        elif path == "/api/compact":
+            self._compact()
         elif path == "/api/agent":
             self._agent()
         elif path == "/api/agent/abort":
@@ -836,6 +838,56 @@ class _Handler(BaseHTTPRequestHandler):
                 "detail": detail,
             }
         )
+
+    # ── compaction ──────────────────────────────────────────────────────
+
+    def _compact(self) -> None:
+        try:
+            body = self._read_json()
+        except (ValueError, json.JSONDecodeError):
+            self._json({"error": "invalid json"}, 400)
+            return
+        session_id = str(body.get("session_id") or "").strip()
+        if not session_id or self.gemma.store.get_session(session_id) is None:
+            self._json({"error": "session not found"}, 404)
+            return
+        instructions = str(body.get("instructions") or "").strip()
+
+        from core.client import LlamaClient
+        from core.compaction import Compactor
+
+        settings = self.gemma.settings
+        compactor = Compactor(
+            LlamaClient(settings),
+            context_limit=settings.context_limit,
+            threshold=getattr(settings, "compact_threshold", 0.8),
+            keep_tokens=getattr(settings, "compact_keep_tokens", 4_000),
+        )
+
+        async def run() -> dict[str, Any]:
+            result = await compactor.compact(
+                self.gemma.store.context_messages(session_id),
+                reason="manual",
+                instructions=instructions,
+            )
+            if result is None:
+                return {"ok": False, "reason": "nothing to compact yet"}
+            self.gemma.store.add_message(
+                session_id,
+                "system",
+                "<conversation-checkpoint>\n" + result.summary + "\n</conversation-checkpoint>",
+                metadata={"kind": "checkpoint", "reason": "manual"},
+            )
+            self.gemma.store.set_summary(session_id, result.summary)
+            return {
+                "ok": True,
+                "removed": result.removed,
+                "before_tokens": result.before_tokens,
+                "after_tokens": result.after_tokens,
+                "summary": result.summary,
+            }
+
+        self._json(asyncio.run(run()))
 
     def _commands(self) -> list[dict[str, str]]:
         try:

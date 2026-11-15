@@ -484,3 +484,43 @@ def test_research_endpoints(web, monkeypatch: pytest.MonkeyPatch) -> None:
         messages = server.build_messages("any", "CTX")
         assert messages[1] == {"role": "system", "content": "CTX"}
         assert len(server.build_messages("any")) == 1  # no context → no extra message
+
+
+def test_compact_endpoint(web, monkeypatch: pytest.MonkeyPatch) -> None:
+    server, base, store = web
+    with _paired_client(base, server) as client:
+        assert client.post("/api/compact", json={"session_id": "nope"}).status_code == 404
+
+        session_id = store.create_session()
+        fresh = store.create_session()
+        for index in range(6):
+            store.add_message(session_id, "user", f"question {index} " + "y" * 9000)
+            store.add_message(session_id, "assistant", f"answer {index} " + "z" * 9000)
+
+        empty = client.post("/api/compact", json={"session_id": fresh})
+        assert empty.status_code == 200
+        assert empty.json()["ok"] is False
+
+        async def fake_search_context(query, **kwargs):  # type: ignore[no-untyped-def]
+            return ""
+
+        # The compactor calls the real model endpoint; stub the LlamaClient it builds.
+        class StubClient:
+            async def complete(self, prompt: str, **kwargs):  # type: ignore[no-untyped-def]
+                return "## Checkpoint summary"
+
+            async def stream_chat(self, messages, **kwargs):  # type: ignore[no-untyped-def]
+                yield "ignored"
+
+        monkeypatch.setattr("core.client.LlamaClient", lambda settings: StubClient())
+        done = client.post(
+            "/api/compact", json={"session_id": session_id, "instructions": "keep the plan"}
+        )
+        assert done.status_code == 200
+        data = done.json()
+        assert data["ok"] is True
+        assert data["removed"] > 0
+        assert data["summary"] == "## Checkpoint summary"
+        roles = [row["role"] for row in store.messages(session_id)]
+        assert roles[-1] == "system"
+        assert store.get_summary(session_id) == "## Checkpoint summary"

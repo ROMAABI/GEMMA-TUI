@@ -562,6 +562,9 @@ export function App(props: { chat: Chat }) {
       default:
         flash(`Unknown command ${name} — try /help`)
         return true
+      case "/compact":
+        void props.chat.compactChat(arg)
+        return true
       case "/websearch": {
         const [first, ...rest] = arg.split(/\s+/).filter(Boolean)
         const value = rest.join(" ")

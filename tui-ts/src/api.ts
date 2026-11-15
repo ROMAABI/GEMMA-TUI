@@ -109,6 +109,15 @@ export interface ResearchTest {
   results: ResearchResult[]
 }
 
+export interface CompactResult {
+  ok: boolean
+  reason?: string
+  removed?: number
+  before_tokens?: number
+  after_tokens?: number
+  summary?: string
+}
+
 export interface DoneStats {
   elapsed: number
   ttft: number
@@ -362,6 +371,14 @@ export class GemmaClient {
   /** Point the pipeline at another SearXNG instance. */
   researchConfig(url: string): Promise<{ ok: boolean; url: string; healthy: boolean; detail: string }> {
     return this.json("/api/research/config", { method: "POST", body: JSON.stringify({ url }) })
+  }
+
+  /** Compact a session into a checkpoint (manual /compact). */
+  compactSession(id: string, instructions?: string): Promise<CompactResult> {
+    return this.json("/api/compact", {
+      method: "POST",
+      body: JSON.stringify(instructions ? { session_id: id, instructions } : { session_id: id }),
+    })
   }
 
   abortRun(runId: string): Promise<unknown> {

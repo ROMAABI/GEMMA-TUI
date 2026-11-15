@@ -456,6 +456,26 @@ export function createChat(client: GemmaClient) {
     }
   }
 
+  /** Fold the active session into a checkpoint and reload it. */
+  async function compactChat(instructions = ""): Promise<void> {
+    const session = activeSession()
+    if (!session) return
+    setNotice("✦ Compacting…")
+    try {
+      const result = await client.compactSession(session.id, instructions)
+      if (!result.ok) {
+        setNotice(result.reason === "nothing to compact yet" ? "Nothing to compact yet" : "Compaction skipped")
+        return
+      }
+      setNotice(
+        `Compacted: ${result.removed} messages removed (${result.before_tokens} → ${result.after_tokens} tokens)`,
+      )
+      await load()
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error))
+    }
+  }
+
   async function refreshTitles(): Promise<void> {
     try {
       const metas = await client.sessions()
@@ -892,6 +912,7 @@ export function createChat(client: GemmaClient) {
     websearch,
     setWebsearch,
     toggleWebsearch,
+    compactChat,
     send,
     stop,
     respondPermission,

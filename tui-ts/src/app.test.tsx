@@ -264,6 +264,19 @@ function startMock(
         const body = (await request.json()) as { url: string }
         return Response.json({ ok: true, url: body.url, healthy: false, detail: "connection refused" })
       }
+      if (path === "/api/compact" && request.method === "POST") {
+        const body = (await request.json()) as { session_id: string }
+        if (body.session_id === "s1") {
+          return Response.json({
+            ok: true,
+            removed: 6,
+            before_tokens: 12000,
+            after_tokens: 2400,
+            summary: "## Checkpoint",
+          })
+        }
+        return Response.json({ ok: false, reason: "nothing to compact yet" })
+      }
 
       if (path === "/api/chat" && request.method === "POST") {
         const body = (await request.json()) as { session_id: string; message: string }
@@ -688,6 +701,17 @@ describe("OpenTUI client", () => {
     setup.mockInput.typeText("/websearch url http://127.0.0.1:9999")
     setup.mockInput.pressEnter()
     await setup.waitForFrame((text: string) => text.includes("SearXNG URL: http://127.0.0.1:9999"))
+  })
+
+  test("/compact folds the session into a checkpoint", async () => {
+    current = startMock()
+    const { setup, chat } = await mount(current)
+    setupRef = setup
+
+    setup.mockInput.typeText("/compact keep the plan")
+    setup.mockInput.pressEnter()
+    await setup.waitForFrame((text: string) => text.includes("Compacted: 6 messages removed"))
+    expect(chat.sessions()[0]?.messages.length).toBe(0)
   })
 
   test("Tab switches chat and agent mode", async () => {
