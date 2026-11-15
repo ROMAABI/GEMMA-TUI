@@ -524,3 +524,19 @@ def test_compact_endpoint(web, monkeypatch: pytest.MonkeyPatch) -> None:
         roles = [row["role"] for row in store.messages(session_id)]
         assert roles[-1] == "system"
         assert store.get_summary(session_id) == "## Checkpoint summary"
+
+
+def test_init_workspace_endpoint(web, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    server, base, _store = web
+    monkeypatch.setattr(server.settings, "workspace_dir", str(tmp_path / "ws"))
+    with _paired_client(base, server) as client:
+        first = client.post("/api/init")
+        assert first.status_code == 200
+        data = first.json()
+        assert data["ok"] is True
+        target = Path(data["path"])
+        assert target.name == "AGENTS.md"
+        assert "## Overview" in target.read_text()
+
+        again = client.post("/api/init")
+        assert again.json() == {"ok": False, "path": str(target), "reason": "exists"}

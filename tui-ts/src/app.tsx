@@ -562,6 +562,16 @@ export function App(props: { chat: Chat }) {
       default:
         flash(`Unknown command ${name} — try /help`)
         return true
+      case "/init":
+        void (async () => {
+          try {
+            const result = await props.chat.client.initWorkspace()
+            flash(result.ok ? `AGENTS.md created at ${result.path}` : "AGENTS.md already exists")
+          } catch (error) {
+            flash(error instanceof Error ? error.message : String(error))
+          }
+        })()
+        return true
       case "/compact":
         void props.chat.compactChat(arg)
         return true

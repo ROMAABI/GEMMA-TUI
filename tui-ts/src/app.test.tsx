@@ -264,6 +264,9 @@ function startMock(
         const body = (await request.json()) as { url: string }
         return Response.json({ ok: true, url: body.url, healthy: false, detail: "connection refused" })
       }
+      if (path === "/api/init" && request.method === "POST") {
+        return Response.json({ ok: true, path: "/workspace/AGENTS.md" })
+      }
       if (path === "/api/compact" && request.method === "POST") {
         const body = (await request.json()) as { session_id: string }
         if (body.session_id === "s1") {
@@ -701,6 +704,16 @@ describe("OpenTUI client", () => {
     setup.mockInput.typeText("/websearch url http://127.0.0.1:9999")
     setup.mockInput.pressEnter()
     await setup.waitForFrame((text: string) => text.includes("SearXNG URL: http://127.0.0.1:9999"))
+  })
+
+  test("/init writes the starter AGENTS.md", async () => {
+    current = startMock()
+    const { setup } = await mount(current)
+    setupRef = setup
+
+    setup.mockInput.typeText("/init")
+    setup.mockInput.pressEnter()
+    await setup.waitForFrame((text: string) => text.includes("AGENTS.md created at /workspace/AGENTS.md"))
   })
 
   test("/compact folds the session into a checkpoint", async () => {

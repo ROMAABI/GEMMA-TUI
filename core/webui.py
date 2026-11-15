@@ -22,6 +22,7 @@ import time
 import webbrowser
 from datetime import datetime, timezone
 from http import HTTPStatus
+from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -384,6 +385,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._research_config()
         elif path == "/api/compact":
             self._compact()
+        elif path == "/api/init":
+            self._init_workspace()
         elif path == "/api/agent":
             self._agent()
         elif path == "/api/agent/abort":
@@ -888,6 +891,30 @@ class _Handler(BaseHTTPRequestHandler):
             }
 
         self._json(asyncio.run(run()))
+
+    # ── workspace bootstrap ─────────────────────────────────────────────
+
+    def _init_workspace(self) -> None:
+        target = (Path(self.gemma.settings.workspace_dir) / "AGENTS.md").resolve()
+        if target.exists():
+            self._json({"ok": False, "path": str(target), "reason": "exists"})
+            return
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            "# Project Instructions\n\n"
+            "## Overview\n"
+            "Describe the project and its purpose.\n\n"
+            "## Commands\n"
+            "- Build: `...`\n"
+            "- Test: `...`\n"
+            "- Lint: `...`\n\n"
+            "## Conventions\n"
+            "- Language and style\n"
+            "- Testing expectations\n"
+            "- Files that must not be edited directly\n",
+            encoding="utf-8",
+        )
+        self._json({"ok": True, "path": str(target)})
 
     def _commands(self) -> list[dict[str, str]]:
         try:

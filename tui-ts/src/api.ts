@@ -381,6 +381,11 @@ export class GemmaClient {
     })
   }
 
+  /** Write a starter AGENTS.md into the workspace (/init). */
+  initWorkspace(): Promise<{ ok: boolean; path: string; reason?: string }> {
+    return this.json("/api/init", { method: "POST" })
+  }
+
   abortRun(runId: string): Promise<unknown> {
     return this.json("/api/agent/abort", { method: "POST", body: JSON.stringify({ run_id: runId }) })
   }
