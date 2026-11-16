@@ -782,3 +782,45 @@ def test_mutating_call_detection() -> None:
     assert AgentOrchestrator._is_mutating_call(
         ToolCall(id="1", name="write", arguments={"path": "a.txt", "content": "x"}), ok
     )
+
+
+def test_tool_output_reaches_model_and_ui_byte_identical(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tool_finish event, the tool message the model receives and the
+    runlog audit record must carry the exact same output string."""
+    import hashlib
+    import json as jsonlib
+
+    (tmp_path / "osr.txt").write_text("NAME=\"Arch Linux\"\nID=arch\n")
+    log_path = tmp_path / "turns.jsonl"
+    monkeypatch.setattr("utils.runlog._PATH", log_path)
+    scripts = [
+        [
+            ProviderEvent(
+                "tool_calls",
+                tool_calls=[ToolCall(id="c1", name="read", arguments={"path": "osr.txt"})],
+            ),
+            ProviderEvent("done"),
+        ],
+        [ProviderEvent("text", text="You're using Arch Linux."), ProviderEvent("done")],
+    ]
+    agent, store, session_id, _ = make_agent(tmp_path, scripts)
+    events = asyncio.run(collect(agent, store, session_id))
+
+    finish = [e for e in events if e.type == "tool_finish"][0]
+    ui_output = finish.content["result"]
+    stored = [m for m in store.messages(session_id) if m["role"] == "tool"][0]
+    assert stored["content"] == ui_output
+
+    records = [jsonlib.loads(line) for line in log_path.read_text().splitlines()]
+    tool_records = [r for r in records if r.get("type") == "tool"]
+    assert tool_records and tool_records[0]["output"] == ui_output
+    assert tool_records[0]["output_sha"] == hashlib.sha256(
+        ui_output.encode("utf-8", "replace")
+    ).hexdigest()[:16]
+    assert tool_records[0]["output_chars"] == len(ui_output)
+    # The turn summary records latency numbers.
+    turns = [r for r in records if r.get("type") == "turn"]
+    assert turns and turns[-1]["outcome"] == "complete"
+    assert turns[-1]["tool_calls"] == 1

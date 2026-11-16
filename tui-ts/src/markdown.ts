@@ -17,7 +17,7 @@ export interface Segment {
 export type Block =
   | { kind: "code"; lang: string; text: string }
   | { kind: "heading"; level: number; text: string }
-  | { kind: "list"; ordered: boolean; items: string[] }
+  | { kind: "list"; ordered: boolean; start: number; items: string[] }
   | { kind: "quote"; text: string }
   | { kind: "table"; text: string }
   | { kind: "hr" }
@@ -26,7 +26,7 @@ export type Block =
 const FENCE = /^\s*(```|~~~)\s*([\w+-]*)\s*$/
 const HEADING = /^(#{1,6})\s+(.*)$/
 const BULLET = /^\s*[-*+]\s+(.*)$/
-const ORDERED = /^\s*\d+[.)]\s+(.*)$/
+const ORDERED = /^\s*(\d+)[.)]\s+(.*)$/
 const QUOTE = /^\s*>\s?(.*)$/
 const RULE = /^\s*([-_*])\1{2,}\s*$/
 
@@ -50,6 +50,10 @@ export function parseMarkdown(source: string): Block[] {
         index++
       }
       index++ // closing fence (or EOF)
+      // Models love to leave a blank first/last line inside the fence; the
+      // padding shows up as extra empty rows in the code card.
+      while (body.length && !body[0]!.trim()) body.shift()
+      while (body.length && !body[body.length - 1]!.trim()) body.pop()
       blocks.push({ kind: "code", lang, text: body.join("\n") })
       continue
     }
@@ -84,15 +88,19 @@ export function parseMarkdown(source: string): Block[] {
 
     if (BULLET.test(line) || ORDERED.test(line)) {
       const ordered = ORDERED.test(line)
+      const first = ordered ? ORDERED.exec(line) : null
+      // The literal first number is kept so numbering survives the list being
+      // split by interleaved code blocks (1 … code … 2 stays 1, 2).
+      const start = first ? Number.parseInt(first[1]!, 10) : 1
       const items: string[] = []
       while (index < lines.length) {
         const current = lines[index] ?? ""
         const match = ordered ? ORDERED.exec(current) : BULLET.exec(current)
         if (!match) break
-        items.push(match[1]!.trim())
+        items.push((ordered ? match[2] : match[1])!.trim())
         index++
       }
-      blocks.push({ kind: "list", ordered, items })
+      blocks.push({ kind: "list", ordered, start, items })
       continue
     }
 

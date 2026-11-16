@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
 
@@ -13,6 +14,7 @@ import httpx
 from config.settings import Settings
 from core.client import LlamaClient
 from core.tools import parse_tool_calls
+from utils import runlog
 
 
 class NativeToolsUnsupported(Exception):
@@ -164,6 +166,9 @@ class NativeToolProvider:
             "stream": stream,
             "temperature": self.settings.temperature if temperature is None else temperature,
             "max_tokens": max_tokens or getattr(self.settings, "agent_max_tokens", 4096),
+            # Reuse the server's prompt cache across steps/turns. llama.cpp
+            # ignores unknown OAI fields, so this is safe everywhere.
+            "cache_prompt": True,
         }
         if tools:
             payload["tools"] = tools
@@ -215,6 +220,8 @@ class NativeToolProvider:
         text_buffer: list[str] = []
         finish_reason = ""
         usage: dict[str, int] = {}
+        self._last_timings: dict[str, Any] = {}
+        started = time.monotonic()
 
         async with httpx.AsyncClient(timeout=timeout) as client:
             async with client.stream("POST", url, json=payload, headers=self._headers()) as response:
@@ -245,6 +252,7 @@ class NativeToolProvider:
                     if isinstance(data.get("usage"), dict):
                         usage = self._merge_usage(usage, data["usage"])
                     if isinstance(data.get("timings"), dict):
+                        self._last_timings = dict(data["timings"])
                         usage = self._merge_usage(usage, self._timings_to_usage(data["timings"]))
 
                     choices = data.get("choices") or []
@@ -283,6 +291,25 @@ class NativeToolProvider:
 
                     if choice.get("finish_reason"):
                         finish_reason = str(choice["finish_reason"])
+
+        # Latency audit: prompt eval (prompt_ms / cache_n shows whether the
+        # server reused the cached prefix) and generation time per step.
+        timings = self._last_timings
+        runlog.log(
+            {
+                "type": "provider_step",
+                "provider": self.name,
+                "stream": True,
+                "ttft_ms": round((time.monotonic() - started) * 1000, 1),
+                "prompt_n": timings.get("prompt_n"),
+                "cache_n": timings.get("cache_n"),
+                "prompt_ms": timings.get("prompt_ms"),
+                "predicted_n": timings.get("predicted_n"),
+                "predicted_ms": timings.get("predicted_ms"),
+                "finish_reason": finish_reason,
+                "tool_calls": bool(accumulated),
+            }
+        )
 
         tool_calls = self._finalize_calls(accumulated)
         if not tool_calls and text_buffer:

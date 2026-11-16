@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
@@ -20,6 +21,7 @@ from core.providers import (
 from core.tooling import ToolContext, ToolRegistry, ToolResult, build_default_registry
 from core.tooling.types import ToolSpec
 from core.tools import WorkspaceTools, build_agent_system_prompt
+from utils import runlog
 
 
 @dataclass
@@ -317,6 +319,31 @@ class AgentOrchestrator:
         mutation_seen = False
         idle_steps = 0
         idle_nudged = False
+        # Latency audit for this turn.
+        turn_started = time.monotonic()
+        first_token_at: float | None = None
+        tool_ms = 0.0
+        tool_count = 0
+        finish_label = "complete"
+
+        # Latency audit helper: one record per turn, whatever the exit path.
+        def log_turn(outcome: str) -> None:
+            total_ms = round((time.monotonic() - turn_started) * 1000, 1)
+            ttft_ms = (
+                round((first_token_at - turn_started) * 1000, 1) if first_token_at else None
+            )
+            runlog.log(
+                {
+                    "type": "turn",
+                    "outcome": outcome,
+                    "steps": step,
+                    "total_ms": total_ms,
+                    "ttft_ms": ttft_ms,
+                    "tool_ms": round(tool_ms, 1),
+                    "tool_calls": tool_count,
+                    "stop_reason": stop_reason,
+                }
+            )
 
         while step < self.max_steps:
             step += 1
@@ -355,6 +382,8 @@ class AgentOrchestrator:
             while True:
                 try:
                     async for event in self._stream_step(conversation, state):
+                        if event.type in ("text", "reasoning") and first_token_at is None:
+                            first_token_at = time.monotonic()
                         yield event
                     break
                 except ContextOverflowError:
@@ -364,6 +393,7 @@ class AgentOrchestrator:
                             "Context is too large and could not be compacted. "
                             "Start a new session or raise the context limit.",
                         )
+                        log_turn("context_overflow")
                         return
                     overflow_retry = True
                     result = await self.compactor.compact(conversation, reason="overflow")
@@ -393,11 +423,13 @@ class AgentOrchestrator:
                         "error",
                         f"Native tool calling is not supported by this server/model: {exc}",
                     )
+                    log_turn("tools_unsupported")
                     return
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:  # noqa: BLE001
                     yield AgentEvent("error", f"Model stream error: {type(exc).__name__}: {exc}")
+                    log_turn("stream_error")
                     return
 
             text = "".join(state["text"])
@@ -499,6 +531,7 @@ class AgentOrchestrator:
                 self._persist_message("assistant", text)
                 yield AgentEvent("assistant_message", {"role": "assistant", "content": text})
                 yield AgentEvent("complete", text)
+                log_turn("complete")
                 return
 
             # Normalize IDs so every call is addressable.
@@ -544,6 +577,10 @@ class AgentOrchestrator:
                 result = results.get(index) or ToolResult.failure(
                     "Tool did not return a result (cancelled or timed out)."
                 )
+                exec_ms = result.metadata.get("exec_ms")
+                if isinstance(exec_ms, (int, float)):
+                    tool_ms += float(exec_ms)
+                    tool_count += 1
                 self._track_failure(unresolved, call, result)
                 if result.ok:
                     if self._is_mutating_call(call, result):
@@ -641,6 +678,7 @@ class AgentOrchestrator:
                 "complete",
                 f"Reached the {self.max_steps}-step limit. Review the tool output above for progress.",
             )
+        log_turn("step_limit" if not loop_stopped else "loop_stopped")
 
     # ── Tool execution ──────────────────────────────────────────────────
 
@@ -933,6 +971,7 @@ class AgentOrchestrator:
                 settings=self.settings,
                 permission=self.permission,
             )
+            started = time.monotonic()
             try:
                 result = await asyncio.wait_for(
                     self.registry.execute(call.name, call.arguments, context),
@@ -946,6 +985,21 @@ class AgentOrchestrator:
                 raise
             except Exception as exc:  # noqa: BLE001
                 result = ToolResult.failure(f"Tool '{call.name}' failed: {exc}")
+            # Latency + exact-output audit: this is byte-for-byte what the
+            # model receives as the tool message, so the UI can be checked
+            # against the same digest.
+            elapsed_ms = round((time.monotonic() - started) * 1000, 1)
+            runlog.log(
+                {
+                    "type": "tool",
+                    "name": call.name,
+                    "step": step,
+                    "ok": result.ok,
+                    "ms": elapsed_ms,
+                    **runlog.output_for_log(result.output),
+                }
+            )
+            result.metadata.setdefault("exec_ms", elapsed_ms)
             return index, call, result
 
     async def _execute_calls(

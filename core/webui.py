@@ -55,6 +55,21 @@ def _iso(value: str | None) -> str:
     return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+CHAT_SYSTEM_PROMPT = """You are Gemma, a friendly assistant running inside the gemma app on the user's own computer.
+
+In this chat mode you answer directly, without tools. The same app has an agent mode
+(the tab key toggles it) that CAN run commands and edit files on this machine.
+
+- Never claim that the user's computer is out of your reach or that nothing on it can be
+  checked. The app you are running in has full shell and file access on this machine.
+- For questions about the user's system — distro, OS version, kernel, files, disk, memory,
+  processes, IP, installed packages — say that you will check with a real command and ask
+  the user to switch to agent mode (press tab, ask again). Never guess or deny.
+- Otherwise answer helpfully and concisely. Reply directly without thinking or reasoning
+  steps.
+"""
+
+
 def _system_prompt() -> str:
     """Reuse the TUI's prompt without importing Textual at module load."""
     try:
@@ -62,7 +77,7 @@ def _system_prompt() -> str:
 
         return SYSTEM_PROMPT
     except Exception:  # noqa: BLE001 - the server must work without the TUI
-        return "You are Gemma, a helpful local AI assistant."
+        return CHAT_SYSTEM_PROMPT
 
 
 _SMALLTALK_RE = re.compile(

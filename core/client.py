@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from collections.abc import AsyncIterator
 
 import httpx
 
 from config.settings import Settings
+from utils import runlog
 
 _THOUGHT_PATTERN = re.compile(r"<\|channel>.*?<channel\|>", re.S)
 _CHANNEL_OPEN = "<|channel>"
@@ -110,6 +112,8 @@ class LlamaClient:
 
         in_preamble = True
         buf = ""
+        last_timings: dict[str, Any] = {}
+        started = time.monotonic()
         async with httpx.AsyncClient(timeout=None) as client:
             async with client.stream(
                 "POST",
@@ -124,6 +128,8 @@ class LlamaClient:
                     if raw == "[DONE]":
                         break
                     data = json.loads(raw)
+                    if isinstance(data.get("timings"), dict):
+                        last_timings = data["timings"]
                     chunk = data.get("content")
                     if not chunk:
                         continue
@@ -153,3 +159,16 @@ class LlamaClient:
                         continue
 
                     yield chunk
+
+        # Latency audit for chat turns (prompt eval + generation, cache hits).
+        runlog.log(
+            {
+                "type": "chat_completion",
+                "ttft_ms": round((time.monotonic() - started) * 1000, 1),
+                "prompt_n": last_timings.get("prompt_n"),
+                "cache_n": last_timings.get("cache_n"),
+                "prompt_ms": last_timings.get("prompt_ms"),
+                "predicted_n": last_timings.get("predicted_n"),
+                "predicted_ms": last_timings.get("predicted_ms"),
+            }
+        )

@@ -33,9 +33,10 @@ function ToolBlock(props: { part: Extract<Part, { kind: "tool" }>; accent: Color
       : ""
   const preview = createMemo(() => {
     const text = (props.part.result ?? "").trim()
-    if (!text) return ""
-    const lines = text.split("\n").slice(0, 4)
-    return lines.join("\n")
+    if (!text) return { lines: [] as string[], hidden: 0 }
+    const lines = text.split("\n")
+    const shown = lines.slice(0, 15)
+    return { lines: shown, hidden: Math.max(lines.length - shown.length, 0) }
   })
 
   return (
@@ -52,11 +53,28 @@ function ToolBlock(props: { part: Extract<Part, { kind: "tool" }>; accent: Color
           <text style={{ fg: colors().faint }}>{duration()}</text>
         </Show>
       </box>
-      <Show when={preview()}>
-        <box border={["left"]} borderColor={colors().border} paddingLeft={1} marginLeft={1}>
-          <text style={{ fg: props.part.status === "error" ? colors().danger : colors().muted }} wrapMode="word">
-            {preview()}
-          </text>
+      <Show when={preview().lines.length}>
+        <box
+          border={["left"]}
+          borderColor={colors().border}
+          paddingLeft={1}
+          marginLeft={1}
+          flexDirection="column"
+          flexShrink={0}
+        >
+          <For each={preview().lines}>
+            {(line) => (
+              <text
+                style={{ fg: props.part.status === "error" ? colors().danger : colors().muted }}
+                wrapMode="word"
+              >
+                {line || " "}
+              </text>
+            )}
+          </For>
+          <Show when={preview().hidden > 0}>
+            <text style={{ fg: colors().faint }}>{`… ${preview().hidden} more lines`}</text>
+          </Show>
         </box>
       </Show>
     </box>
@@ -196,7 +214,7 @@ export function MessageCard(props: {
                   {`⚡ ${formatSeconds(props.message.elapsed ?? 0)}`}
                   {` · ${formatNumber(
                     Math.round(
-                      (props.message.content.length / 4) /
+                      (props.message.tokens ?? props.message.content.length / 4) /
                         Math.max((props.message.elapsed ?? 0) - (props.message.ttft ?? 0), 0.001),
                     ),
                   )} tok/s`}

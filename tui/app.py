@@ -75,7 +75,13 @@ def _load_unfiltered_prompt() -> str:
             return "\n".join(lines).strip()
         return "\n".join(lines[lines.index("---") + 1 :]).strip()
     except OSError:
-        return "You are a helpful assistant. Reply directly without thinking or reasoning steps."
+        return (
+            "You are Gemma, a friendly assistant running inside the gemma app on the "
+            "user's own computer. In this chat mode you answer directly, without tools; "
+            "agent mode in the same app can run commands on this machine. Never claim "
+            "the user's computer is out of your reach. Reply directly without thinking "
+            "or reasoning steps."
+        )
 
 
 SYSTEM_PROMPT = _load_unfiltered_prompt()

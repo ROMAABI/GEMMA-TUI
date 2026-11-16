@@ -5,17 +5,26 @@ import { colors } from "../theme"
 import { useRenderer } from "@opentui/solid"
 import { SyntaxStyle } from "@opentui/core"
 
-function InlineSegments(props: { text: string; accent: ColorInput; base?: ColorInput }) {
+function InlineSegments(props: { text: string; accent: ColorInput; base?: ColorInput; depth?: number }) {
   const segments = createMemo(() => inline(props.text))
+  const depth = props.depth ?? 0
   return (
     <For each={segments()}>
       {(segment: Segment) => (
         <Switch>
           <Match when={segment.bold}>
-            <b style={{ fg: props.base ?? colors().text }}>{segment.text}</b>
+            <b style={{ fg: props.base ?? colors().text }}>
+              <Show when={depth < 2} fallback={<>{segment.text}</>}>
+                <InlineSegments text={segment.text} accent={props.accent} base={props.base ?? colors().text} depth={depth + 1} />
+              </Show>
+            </b>
           </Match>
           <Match when={segment.italic}>
-            <i style={{ fg: props.base ?? colors().dim }}>{segment.text}</i>
+            <i style={{ fg: props.base ?? colors().dim }}>
+              <Show when={depth < 2} fallback={<>{segment.text}</>}>
+                <InlineSegments text={segment.text} accent={props.accent} base={props.base ?? colors().dim} depth={depth + 1} />
+              </Show>
+            </i>
           </Match>
           <Match when={segment.code}>
             <span style={{ fg: props.accent, bg: colors().code }}>
@@ -63,7 +72,7 @@ function CodeBlock(props: { lang: string; text: string; accent: ColorInput; onCo
           ❐ Copy
         </text>
       </box>
-      <box paddingLeft={1} paddingRight={1} paddingTop={1} paddingBottom={1}>
+      <box paddingLeft={1} paddingRight={1}>
         <code content={props.text} filetype={props.lang || "text"} syntaxStyle={style} />
       </box>
     </box>
@@ -93,12 +102,14 @@ function BlockView(props: { block: Block; accent: ColorInput; onCopy?: (text: st
       </Match>
 
       <Match when={props.block.kind === "list" ? props.block : null}>
-        {(block: Accessor<{ kind: "list"; ordered: boolean; items: string[] }>) => (
+        {(block: Accessor<{ kind: "list"; ordered: boolean; start: number; items: string[] }>) => (
           <box flexDirection="column">
             <For each={block().items}>
               {(item, index) => (
                 <text wrapMode="word">
-                  <span style={{ fg: props.accent }}>{block().ordered ? `${index() + 1}.` : "•"}</span>{" "}
+                  <span style={{ fg: props.accent }}>
+                    {block().ordered ? `${block().start + index()}.` : "•"}
+                  </span>{" "}
                   <InlineSegments text={item} accent={props.accent} />
                 </text>
               )}

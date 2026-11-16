@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { inline, parseMarkdown } from "./markdown"
+import { inline, parseMarkdown, type Block } from "./markdown"
 
 describe("parseMarkdown", () => {
   test("reads headings, paragraphs and blank-line separation", () => {
@@ -16,8 +16,24 @@ describe("parseMarkdown", () => {
 
   test("reads ordered and bulleted lists separately", () => {
     const blocks = parseMarkdown("- one\n- two\n\n1. first\n2. second")
-    expect(blocks[0]).toEqual({ kind: "list", ordered: false, items: ["one", "two"] })
-    expect(blocks[1]).toEqual({ kind: "list", ordered: true, items: ["first", "second"] })
+    expect(blocks[0]).toEqual({ kind: "list", ordered: false, start: 1, items: ["one", "two"] })
+    expect(blocks[1]).toEqual({ kind: "list", ordered: true, start: 1, items: ["first", "second"] })
+  })
+
+  test("keeps the literal start number across interleaved code blocks", () => {
+    const blocks = parseMarkdown("1. run it\n\n```bash\nmake\n```\n\n2. verify")
+    expect(blocks.map((block) => block.kind)).toEqual(["list", "code", "list"])
+    const lists = blocks.filter((block) => block.kind === "list") as Extract<
+      Block,
+      { kind: "list" }
+    >[]
+    expect(lists[0]!.start).toBe(1)
+    expect(lists[1]!.start).toBe(2)
+  })
+
+  test("trims blank padding lines inside fenced code", () => {
+    const blocks = parseMarkdown("```js\n\n\nlet a = 1\n\n\n```")
+    expect(blocks[0]).toEqual({ kind: "code", lang: "js", text: "let a = 1" })
   })
 
   test("reads quotes, tables and rules", () => {

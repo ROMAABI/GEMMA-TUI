@@ -40,6 +40,8 @@ export interface Message {
   createdAt: string
   elapsed?: number
   ttft?: number
+  /** Generation tokens reported by the provider, when available. */
+  tokens?: number
   stopped?: boolean
   error?: string
   /** Web-search state for this turn: status line while running, sources after. */
@@ -527,6 +529,21 @@ export function createChat(client: GemmaClient) {
       const local = sessions().find((session) => session.id === sessionId)
       // Only trust the server when it actually stored this turn.
       if (!local || canonical.length < local.messages.length) return
+      // Server messages have no timing stats; carry the just-measured ones
+      // over by role+content so the ⚡ line survives the swap.
+      const stats = new Map(
+        local.messages
+          .filter((message) => typeof message.elapsed === "number")
+          .map((message) => [`${message.role}:${message.content}`, message]),
+      )
+      for (const message of canonical) {
+        const prior = stats.get(`${message.role}:${message.content}`)
+        if (prior) {
+          message.elapsed = prior.elapsed
+          message.ttft = prior.ttft
+          message.tokens = prior.tokens
+        }
+      }
       patchSession(sessionId, (current) => ({
         ...current,
         title: detail.title || current.title,
@@ -743,6 +760,7 @@ export function createChat(client: GemmaClient) {
         content,
         elapsed: elapsedVal,
         ttft: ttftVal,
+        tokens: finalStats?.tokens,
       }))
       void refreshTitles()
     } catch (error) {
@@ -891,6 +909,7 @@ export function createChat(client: GemmaClient) {
         ...message,
         elapsed,
         ttft: firstAt ? (firstAt - startedAt) / 1000 : elapsed,
+        tokens: tokens || undefined,
         stopped: stopped || message.stopped,
         error: failure ?? message.error,
       }))
