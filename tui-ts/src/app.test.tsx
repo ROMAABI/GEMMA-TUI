@@ -429,8 +429,9 @@ describe("OpenTUI client", () => {
     setupRef = setup
 
     const frame = setup.captureCharFrame()
-    // Wordmark + greeting
-    expect(frame).toContain("▀")
+    // Wordmark + tagline + greeting
+    expect(frame).toContain("██████╗")
+    expect(frame).toContain("local coding agent · offline")
     expect(frame).toContain("Where should we start?")
     // The prompt pill with real server data
     expect(frame).toContain("Ask anything… (/ for commands)")
