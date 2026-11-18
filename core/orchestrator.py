@@ -39,6 +39,12 @@ _REALTIME_PATTERNS = [
 ]
 
 _YEAR_RE = re.compile(r"\b(2\d{3})\b")
+# "do you know X" / "what is X" about a product or person still needs fresh
+# facts; the rewrite step makes the follow-up standalone before searching.
+_KNOW_RE = re.compile(
+    r"\b(do you know|u know|you know|know about|what is|who is|tell me about)\b",
+    re.IGNORECASE,
+)
 
 _OFFICE_RE = re.compile(
     r"\b(?:current|incumbent|new|latest|now)?\s*"
@@ -108,7 +114,7 @@ def _judge_prompt(question: str) -> str:
 
 async def decide_search(question: str, client: LlamaClient) -> tuple[bool, list[str]]:
     """Return (needs_web_search, candidate_queries_in_priority_order)."""
-    heuristic = _has_realtime_signal(question)
+    heuristic = _has_realtime_signal(question) or bool(_KNOW_RE.search(question))
     office_q = _office_query(question)
 
     # Fresh questions ("latest/current/newest…") and office-holder questions

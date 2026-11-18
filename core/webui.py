@@ -824,24 +824,39 @@ class _Handler(BaseHTTPRequestHandler):
         if _SMALLTALK_RE.match(message):
             self._json({"search": False, "reason": "smalltalk"})
             return
+        history_raw = body.get("history") or []
+        history: list[str] = []
+        for item in history_raw[-6:]:
+            if isinstance(item, dict):
+                content = str(item.get("content") or "").strip()
+            else:
+                content = str(item or "").strip()
+            if content:
+                history.append(content[:500])
         deep_read = bool(body.get("deep_read", True))
 
         async def run() -> dict[str, Any]:
             from core.orchestrator import decide_search
-            from core.research import format_context, web_search
+            from core.research import format_context, intent_of, query_entity, rewrite_query, web_search
 
             settings = self.gemma.settings
             client = LlamaClient(settings)
             needs, queries = await decide_search(message, client)
             if not needs:
                 return {"search": False}
+            rewritten = await rewrite_query(
+                queries[0] if queries else message, history, client, settings.search_region
+            )
+            candidates = [rewritten] + [
+                query for query in queries + [message] if query != rewritten
+            ]
+            intent = intent_of(rewritten)
             started = time.monotonic()
-            for query in queries:
+            for query in candidates:
                 try:
                     results = await web_search(
-                        query,
-                        searxng_url=settings.searxng_url,
-                        deep_read=deep_read,
+                        query, searxng_url=settings.searxng_url,
+                        deep_read=deep_read, intent=intent,
                     )
                 except Exception:  # noqa: BLE001 - fall through to the next query
                     results = []
@@ -849,6 +864,8 @@ class _Handler(BaseHTTPRequestHandler):
                     response: dict[str, Any] = {
                         "search": True,
                         "query": query,
+                        "rewritten": rewritten,
+                        "intent": intent,
                         "results": [self._result_payload(item) for item in results],
                         "elapsed": round(time.monotonic() - started, 3),
                     }
@@ -865,8 +882,11 @@ class _Handler(BaseHTTPRequestHandler):
             healthy, detail = await check_searxng_health(settings.searxng_url)
             return {
                 "search": True,
-                "query": queries[0] if queries else "",
+                "query": rewritten,
+                "rewritten": rewritten,
+                "intent": intent,
                 "results": [],
+                "entity": query_entity(rewritten),
                 "healthy": healthy,
                 "detail": detail,
             }
@@ -907,20 +927,32 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         async def run() -> dict[str, Any]:
-            from core.research import _enrich, _USER_AGENTS, format_context
+            from core.research import (
+                _SEARCH_TIMEOUT, _USER_AGENTS, _enrich, format_context, intent_of,
+                relevant_results,
+            )
 
-            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
-                from core.research import _rank_results
+            async with httpx.AsyncClient(
+                timeout=_SEARCH_TIMEOUT + 2, follow_redirects=True
+            ) as client:
+                enriched = await _enrich(results, client, _USER_AGENTS[0], deep_read=True)
 
-                enriched = await _enrich(
-                    results, client, _USER_AGENTS[0], deep_read=True
-                )
-            enriched = _rank_results(enriched)
+            # Only sources whose page text was actually fetched are fed to the
+            # model and shown in the sources block.
+            used = [
+                item for item in relevant_results(enriched, query, intent_of(query))
+                if item.get("excerpt")
+            ]
+            if not used:
+                return {"ok": False, "error": "no page text could be fetched", "results": []}
             return {
                 "ok": True,
                 "query": query,
-                "context": format_context(enriched),
-                "results": [self._result_payload(item) | {"excerpt": str(item.get("excerpt") or "")} for item in enriched],
+                "context": format_context(used),
+                "results": [
+                    self._result_payload(item) | {"excerpt": str(item.get("excerpt") or "")}
+                    for item in used
+                ],
             }
 
         self._json(asyncio.run(run()))

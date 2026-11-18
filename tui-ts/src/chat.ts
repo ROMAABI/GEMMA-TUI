@@ -54,6 +54,8 @@ export interface Message {
 
 export interface SearchState {
   status: "searching" | "reading" | "ok" | "failed"
+  query?: string
+  count?: number
   sources?: Array<{ title: string; domain: string; date?: string }>
   error?: string
 }
@@ -80,6 +82,20 @@ export interface Metrics {
 // round-trip. Ported from tui/app.py's _SMALLTALK_RE.
 const SMALLTALK_RE =
   /^(hi|hey|hello|yo|sup|hiya)(\s+(gemma|there|bot|assistant|friend))?[\s!.,?]*$|^(thanks|thank you|thx|ok|okay|good (morning|afternoon|evening|night)|how are you|how's it going|what'?s up|bye|goodbye)[\s!.,?]*$/i
+
+const MEMORY_PREFIX = "(from model memory, may be outdated) "
+
+/** Mark a reply that was answered without live search results. */
+function markMemoryFallback(message: Message): Message {
+  const text = MEMORY_PREFIX + message.content
+  const parts = message.parts.map((part, index) =>
+    index === 0 && part.kind === "text" ? { ...part, text: MEMORY_PREFIX + part.text } : part,
+  )
+  if (!parts.some((part) => part.kind === "text")) {
+    parts.unshift({ kind: "text", text: MEMORY_PREFIX })
+  }
+  return { ...message, content: text, parts }
+}
 
 let counter = 0
 
@@ -730,7 +746,11 @@ export function createChat(client: GemmaClient) {
     sessionId: string,
     assistantId: string,
     raw: string,
-  ): Promise<{ context?: string; sources?: Array<{ title: string; domain: string; date?: string }> }> {
+  ): Promise<{
+    context?: string
+    sources?: Array<{ title: string; domain: string; date?: string }>
+    memoryFallback?: boolean
+  }> {
     const mark = (search: SearchState | undefined) =>
       patchMessage(sessionId, assistantId, (message) => ({ ...message, search }))
 
@@ -740,17 +760,26 @@ export function createChat(client: GemmaClient) {
       return {}
     }
 
-    // Phase 1: judge + SearXNG search (fast, no page fetches).
+    // Phase 1: judge + rewrite + SearXNG search (fast, no page fetches).
+    const history = (activeSession()?.messages ?? [])
+      .slice(-7, -1)
+      .filter((message) => message.content.trim())
+      .map((message) => `${message.role === "user" ? "User" : "Assistant"}: ${message.content.slice(0, 400)}`)
     mark({ status: "searching" })
     try {
-      const prep = await client.researchPrepare(raw.trim(), false)
+      const prep = await client.researchPrepare(raw.trim(), history, false)
       if (!prep.search) {
         mark(undefined)
         return {}
       }
+      const label = prep.rewritten ?? prep.query ?? raw.trim()
       if (!prep.results?.length) {
-        mark({ status: "failed", error: prep.detail ?? "no results" })
-        return {}
+        mark({
+          status: "failed",
+          query: label,
+          error: prep.entity ? `Couldn't find reliable results for ${prep.entity}` : (prep.detail ?? "no results"),
+        })
+        return { memoryFallback: true }
       }
 
       const sources = prep.results.map((result) => ({
@@ -760,22 +789,27 @@ export function createChat(client: GemmaClient) {
       }))
 
       // Phase 2: read the top pages (server fetches them in parallel).
-      mark({ status: "reading", sources })
+      mark({ status: "reading", query: label, count: sources.length, sources })
       const read = await client.researchRead(prep.query ?? raw.trim(), prep.results)
-      const dated = read.results.map((result) => ({
+      const used = (read.results ?? []).filter((result) => result.excerpt)
+      const dated = used.map((result) => ({
         title: result.title ?? "",
         domain: domainOf(result.url ?? ""),
         date: result.date ?? "",
       }))
-      if (read.context) {
-        mark({ status: "ok", sources: dated })
+      if (read.ok && read.context && dated.length) {
+        mark({ status: "ok", query: label, count: dated.length, sources: dated })
         return { context: read.context, sources: dated }
       }
-      mark({ status: "failed", error: "page reads returned nothing" })
-      return {}
+      mark({
+        status: "failed",
+        query: label,
+        error: read.error ?? "no page text could be fetched",
+      })
+      return { memoryFallback: true }
     } catch (error) {
       mark({ status: "failed", error: error instanceof Error ? error.message : String(error) })
-      return {}
+      return { memoryFallback: true }
     }
   }
 
@@ -786,6 +820,7 @@ export function createChat(client: GemmaClient) {
     let firstAt: number | null = null
     let tokens = 0
     let content = ""
+    let memoryFallback = false
     const statsBox: { value: DoneStats | null } = { value: null }
 
     // Web research: the server judges the question (with the same heuristics
@@ -795,6 +830,7 @@ export function createChat(client: GemmaClient) {
     if (websearch()) {
       const prep = await prepareSearch(sessionId, assistantId, raw.trim())
       context = prep.context
+      memoryFallback = prep.memoryFallback === true
     }
 
     try {
@@ -828,13 +864,16 @@ export function createChat(client: GemmaClient) {
       const finalStats = statsBox.value
       const elapsedVal = finalStats?.elapsed ?? (performance.now() - startedAt) / 1000
       const ttftVal = finalStats?.ttft ?? (firstAt ? (firstAt - startedAt) / 1000 : elapsedVal)
-      patchMessage(sessionId, assistantId, (message) => ({
-        ...message,
-        content,
-        elapsed: elapsedVal,
-        ttft: ttftVal,
-        tokens: finalStats?.tokens,
-      }))
+      patchMessage(sessionId, assistantId, (message) => {
+        const patched = {
+          ...message,
+          content,
+          elapsed: elapsedVal,
+          ttft: ttftVal,
+          tokens: finalStats?.tokens,
+        }
+        return memoryFallback ? markMemoryFallback(patched) : patched
+      })
       void refreshTitles()
     } catch (error) {
       applyFailure(sessionId, assistantId, error, content, false)
@@ -853,6 +892,7 @@ export function createChat(client: GemmaClient) {
     let stopped = false
     let failure: string | null = null
     let currentRun = ""
+    let memoryFallback = false
 
     // Web research rides into the agent run as extra system context, so tool
     // work still happens but facts come from the fresh results.
@@ -860,6 +900,7 @@ export function createChat(client: GemmaClient) {
     if (websearch()) {
       const prep = await prepareSearch(sessionId, assistantId, raw.trim())
       context = prep.context
+      memoryFallback = prep.memoryFallback === true
     }
 
     const update = (patch: (message: Message) => Message) =>
@@ -1017,7 +1058,7 @@ export function createChat(client: GemmaClient) {
               : sum,
           0,
         )
-        return {
+        const patched = {
           ...message,
           elapsed,
           ttft: firstAt ? (firstAt - startedAt) / 1000 : elapsed,
@@ -1027,6 +1068,7 @@ export function createChat(client: GemmaClient) {
           stopped: stopped || message.stopped,
           error: failure ?? message.error,
         }
+        return memoryFallback ? markMemoryFallback(patched) : patched
       })
       finishTurn()
       await reconcile(sessionId)

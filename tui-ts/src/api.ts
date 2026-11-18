@@ -84,6 +84,9 @@ export interface ResearchPrepare {
   search: boolean
   reason?: string
   query?: string
+  rewritten?: string
+  intent?: string
+  entity?: string
   context?: string
   elapsed?: number
   /** Top results, for showing sources under the answer. */
@@ -372,11 +375,15 @@ export class GemmaClient {
 
   /** Judge + SearXNG pipeline for one user message (server-side). */
   /** Judge the message and run the SearXNG search (phase 1; no page reads). */
-  researchPrepare(message: string, deepRead = true): Promise<ResearchPrepare> {
+  researchPrepare(
+    message: string,
+    history: string[] = [],
+    deepRead = true,
+  ): Promise<ResearchPrepare> {
     return this.json(
       "/api/research/prepare",
-      { method: "POST", body: JSON.stringify({ message, deep_read: deepRead }) },
-      15_000,
+      { method: "POST", body: JSON.stringify({ message, history, deep_read: deepRead }) },
+      30_000,
     )
   }
 
@@ -384,11 +391,11 @@ export class GemmaClient {
   researchRead(
     query: string,
     results: ResearchResult[],
-  ): Promise<{ ok: boolean; query: string; context: string; results: ResearchResult[] }> {
+  ): Promise<{ ok: boolean; query: string; context?: string; results: ResearchResult[]; error?: string }> {
     return this.json(
       "/api/research/read",
       { method: "POST", body: JSON.stringify({ query, results }) },
-      15_000,
+      30_000,
     )
   }
 

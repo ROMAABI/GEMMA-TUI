@@ -32,6 +32,7 @@ class Settings:
     theme: str = "opencode"
     searxng_url: str = "http://localhost:8888"
     searxng_deep_read: bool = True
+    search_region: str = "India"
     agent_mode: bool = True
     workspace_dir: str = "."
     agent_max_steps: int = 10
@@ -67,6 +68,7 @@ class Settings:
             settings.theme = data.get("ui", {}).get("theme", settings.theme)
             settings.searxng_url = data.get("search", {}).get("searxng_url", settings.searxng_url)
             settings.searxng_deep_read = data.get("search", {}).get("deep_read", settings.searxng_deep_read)
+            settings.search_region = data.get("search", {}).get("region", settings.search_region)
 
             agent = data.get("agent", {})
             settings.agent_mode = agent.get("enabled", settings.agent_mode)
@@ -104,6 +106,7 @@ class Settings:
         settings.base_url = os.getenv("GEMMA_BASE_URL", settings.base_url).rstrip("/")
         settings.api_key = os.getenv("GEMMA_API_KEY", settings.api_key)
         settings.searxng_url = os.getenv("SEARXNG_URL", settings.searxng_url).rstrip("/")
+        settings.search_region = os.getenv("GEMMA_REGION", settings.search_region)
         env_agent = os.getenv("GEMMA_AGENT_MODE")
         if env_agent is not None:
             settings.agent_mode = env_agent.lower() in ("1", "true", "yes", "on")
@@ -229,6 +232,7 @@ class Settings:
             "search": {
                 "searxng_url": self.searxng_url,
                 "deep_read": self.searxng_deep_read,
+                "region": self.search_region,
             },
             "agent": {
                 "enabled": self.agent_mode,

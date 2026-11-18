@@ -477,6 +477,11 @@ def test_service_status_and_actions(web) -> None:
 
 def test_research_endpoints(web, monkeypatch: pytest.MonkeyPatch) -> None:
     server, base, _store = web
+
+    async def fake_rewrite(message, history, llm, region="India"):
+        return message
+
+    monkeypatch.setattr("core.research.rewrite_query", fake_rewrite)
     with _paired_client(base, server) as client:
         # Smalltalk never triggers the search pipeline.
         small = client.post("/api/research/prepare", json={"message": "hi there!"})
@@ -519,13 +524,13 @@ def test_research_endpoints(web, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("core.research.web_search", empty_search)
         monkeypatch.setattr("core.research.check_searxng_health", fake_health)
         empty = client.post("/api/research/prepare", json={"message": "breaking news now"})
-        assert empty.json() == {
-            "search": True,
-            "query": "latest gemma news",
-            "results": [],
-            "healthy": False,
-            "detail": "Connection refused",
-        }
+        empty_data = empty.json()
+        assert empty_data["search"] is True
+        assert empty_data["query"] == "latest gemma news"
+        assert empty_data["rewritten"] == "latest gemma news"
+        assert empty_data["results"] == []
+        assert empty_data["healthy"] is False
+        assert empty_data["detail"] == "Connection refused"
 
         # Web context rides into the chat messages after the system prompt.
         messages = server.build_messages("any", "CTX")
@@ -632,7 +637,8 @@ def test_research_fresh_quality(web, monkeypatch: pytest.MonkeyPatch) -> None:
     )
     assert "Today is" in context
     assert "most recent" in context.lower()
-    assert "not found in results" in context
+    assert "fetched page text" in context
+    assert "Start with the answer" in context
     assert "(Source:" not in context
     assert "Published: 2025-11-01" in context
     assert len(context) <= research._CONTEXT_CHAR_BUDGET + 700  # instructions overhead
@@ -644,7 +650,7 @@ def test_research_fresh_quality(web, monkeypatch: pytest.MonkeyPatch) -> None:
 
         async def fake_search(query, **kwargs):  # type: ignore[no-untyped-def]
             return [
-                {"title": "Fresh news", "url": "https://news.example.com/a", "engine": "searxng", "date": "2025-11-01"},
+                {"title": "Gemini model news", "url": "https://news.example.com/a", "engine": "searxng", "date": "2025-11-01"},
             ]
 
         monkeypatch.setattr("core.orchestrator.decide_search", fake_decide)

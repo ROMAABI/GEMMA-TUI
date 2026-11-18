@@ -119,13 +119,17 @@ function SearchBlock(props: { search: NonNullable<Message["search"]>; accent: Co
       <Match when={props.search.status === "searching"}>
         <box flexDirection="row" height={1} gap={1} marginTop={1}>
           <text style={{ fg: props.accent }}>✦</text>
-          <text style={{ fg: colors().muted }}>Searching the web…</text>
+          <text style={{ fg: colors().muted }} truncate>
+            {`searching… ${props.search.query ?? ""}`.trim()}
+          </text>
         </box>
       </Match>
       <Match when={props.search.status === "reading"}>
         <box flexDirection="row" height={1} gap={1} marginTop={1}>
           <text style={{ fg: props.accent }}>✦</text>
-          <text style={{ fg: colors().muted }}>Reading top results…</text>
+          <text style={{ fg: colors().muted }}>
+            {`reading ${props.search.count ?? props.search.sources?.length ?? 0} pages…`}
+          </text>
         </box>
       </Match>
       <Match when={props.search.status === "failed"}>
