@@ -16,6 +16,8 @@ export function Sidebar(props: {
   onNew: () => void
   onSelect: (id: string) => void
   onSettings: () => void
+  /** Float above the chat on narrow terminals instead of taking layout space. */
+  overlay?: boolean
 }) {
   const dims = useTerminalDimensions()
   const width = () => SIDEBAR_WIDTH(dims().width)
@@ -39,6 +41,11 @@ export function Sidebar(props: {
       paddingLeft={1}
       paddingRight={1}
       paddingTop={1}
+      position={props.overlay ? "absolute" : undefined}
+      zIndex={props.overlay ? 80 : undefined}
+      top={props.overlay ? 0 : undefined}
+      left={props.overlay ? 0 : undefined}
+      height={props.overlay ? "100%" : undefined}
     >
       <box flexDirection="row" height={1} flexShrink={0} justifyContent="space-between">
         <text>

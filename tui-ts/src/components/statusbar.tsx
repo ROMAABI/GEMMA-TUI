@@ -6,7 +6,12 @@ import { formatNumber } from "../format"
  * Bottom strip: real context metrics on the left, command hint and version on
  * the right. Background is transparent so it inherits the canvas behind it.
  */
-export function StatusBar(props: { metrics: Metrics; width: number; version?: string }) {
+export function StatusBar(props: {
+  metrics: Metrics
+  width: number
+  version?: string
+  sessionsHint?: boolean
+}) {
   const left = () => {
     const m = props.metrics
     const parts = [`ctx ${formatNumber(m.contextUsed)}/${formatNumber(m.contextMax)}`]
@@ -16,7 +21,9 @@ export function StatusBar(props: { metrics: Metrics; width: number; version?: st
   }
 
   const right = () => {
-    const items = ["ctrl+p commands"]
+    const items: string[] = []
+    if (props.sessionsHint) items.push("ctrl+b sessions")
+    items.push("ctrl+p commands")
     if (props.version && props.width >= 70) items.push(`v${props.version}`)
     return items.join(" · ")
   }

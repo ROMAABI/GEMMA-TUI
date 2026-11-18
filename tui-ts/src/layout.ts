@@ -2,6 +2,8 @@
  * Shared shell layout constants. Sidebar sizing has one source of truth so the
  * main area, composer and top bar stay in sync when the terminal is resized.
  */
+export const SIDEBAR_HIDE_BELOW = 72
+
 export const LAYOUT = {
   sidebar: {
     /** Minimum terminal width for each sidebar size. */
@@ -18,7 +20,6 @@ export const LAYOUT = {
     /** Fixed rows above/below the scrolling session list. */
     chromeRows: 13,
     minListRows: 3,
-    autoHideBelow: 92,
   },
 } as const
 

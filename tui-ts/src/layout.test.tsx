@@ -5,10 +5,14 @@ import { testRender } from "@opentui/solid"
 import type { TestRendererSetup } from "@opentui/core/testing"
 import { App } from "./app"
 import { createChat } from "./chat"
-import { LAYOUT, SIDEBAR_WIDTH, sessionTitleWidth } from "./layout"
+import { LAYOUT, SIDEBAR_HIDE_BELOW, SIDEBAR_WIDTH, sessionTitleWidth } from "./layout"
 import { truncate } from "./format"
 
 describe("sidebar layout", () => {
+  test("hide threshold is a single layout constant", () => {
+    expect(SIDEBAR_HIDE_BELOW).toBe(72)
+  })
+
   test("width follows the single breakpoint config", () => {
     expect(SIDEBAR_WIDTH(140)).toBe(LAYOUT.sidebar.columns.wide)
     expect(SIDEBAR_WIDTH(120)).toBe(36)
@@ -32,8 +36,9 @@ describe("sidebar layout", () => {
   const setups: TestRendererSetup[] = []
   const sizes: Array<[number, number]> = [
     [120, 40],
-    [100, 30],
-    [80, 24],
+    [90, 30],
+    [72, 24],
+    [60, 20],
   ]
   for (const [width, height] of sizes) {
     test(`shell has no overflow at ${width}x${height}`, async () => {
@@ -48,10 +53,94 @@ describe("sidebar layout", () => {
       )
       expect(lines.length).toBe(height)
       for (const line of lines) expect(line.length).toBe(width)
-      // The rail is shown at >= 100 columns and auto-hidden below 92.
-      expect(setup.captureCharFrame().includes("◆ gemma")).toBe(width >= 100)
+      // The rail is shown at the threshold and above, hidden below it.
+      expect(setup.captureCharFrame().includes("◆ gemma")).toBe(width >= SIDEBAR_HIDE_BELOW)
+      if (width < SIDEBAR_HIDE_BELOW) {
+        expect(setup.captureCharFrame()).toContain("ctrl+b sessions")
+        expect(setup.captureCharFrame()).toContain("Where should we start?")
+      }
     })
   }
+
+  test("live resize follows the threshold in both directions", async () => {
+    const chat = createChat({ health: async () => ({ status: "ok", app: "gemma" }) } as never)
+    const setup = await testRender(() => <App chat={chat} />, { width: 120, height: 40 })
+    setups.push(setup)
+    await setup.renderOnce()
+    expect(setup.captureCharFrame()).toContain("◆ gemma")
+
+    setup.resize(SIDEBAR_HIDE_BELOW - 1, 24)
+    await setup.renderOnce()
+    expect(setup.captureCharFrame()).not.toContain("◆ gemma")
+
+    setup.resize(SIDEBAR_HIDE_BELOW, 24)
+    await setup.renderOnce()
+    expect(setup.captureCharFrame()).toContain("◆ gemma")
+  })
+
+  test("manual ctrl+b choice survives resizes; narrow rail floats and Esc closes it", async () => {
+    const chat = createChat({ health: async () => ({ status: "ok", app: "gemma" }) } as never)
+    const setup = await testRender(() => <App chat={chat} />, { width: 120, height: 40 })
+    setups.push(setup)
+    await setup.renderOnce()
+
+    setup.mockInput.pressKey("b", { ctrl: true })
+    await setup.renderOnce()
+    expect(setup.captureCharFrame()).not.toContain("◆ gemma")
+
+    setup.resize(60, 20)
+    await setup.renderOnce()
+    expect(setup.captureCharFrame()).not.toContain("◆ gemma")
+
+    setup.resize(120, 40)
+    await setup.renderOnce()
+    expect(setup.captureCharFrame()).not.toContain("◆ gemma")
+
+    // Opening it while narrow overlays the chat; Esc dismisses it again.
+    setup.resize(60, 20)
+    await setup.renderOnce()
+    setup.mockInput.pressKey("b", { ctrl: true })
+    await setup.renderOnce()
+    expect(setup.captureCharFrame()).toContain("◆ gemma")
+    setup.mockInput.pressKey("ESCAPE")
+    // A lone ESC is released by the parser after its escape timeout.
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    await setup.renderOnce()
+    expect(setup.captureCharFrame()).not.toContain("◆ gemma")
+  })
+
+  test("selecting a session from the narrow overlay closes it", async () => {
+    const now = "2026-11-18T10:00:00Z"
+    const chat = createChat({
+      health: async () => ({ status: "ok", app: "gemma" }),
+      info: async () => ({ app: "gemma", mode: "chat", model: "test", version: "0.1.0" }),
+      sessions: async () => [
+        { id: "s1", title: "Old chat", updated_at: now, message_count: 1 },
+      ],
+      session: async () => ({
+        id: "s1",
+        title: "Old chat",
+        updated_at: now,
+        messages: [{ role: "user", content: "hi", created_at: now }],
+      }),
+    } as never)
+    await chat.load()
+    const setup = await testRender(() => <App chat={chat} />, { width: 60, height: 20 })
+    setups.push(setup)
+    await setup.renderOnce()
+    expect(setup.captureCharFrame()).not.toContain("◆ gemma")
+
+    setup.mockInput.pressKey("b", { ctrl: true })
+    await setup.renderOnce()
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("◆ gemma")
+    const row = frame.split("\n").findIndex((line) => line.includes("Old chat"))
+    expect(row).toBeGreaterThanOrEqual(0)
+    await setup.mockMouse.click(2, row)
+    await setup.renderOnce()
+    expect(chat.activeId()).toBe("s1")
+    expect(setup.captureCharFrame()).not.toContain("◆ gemma")
+  })
 
   test("disposes renderers", async () => {
     for (const setup of setups) await setup.dispose()

@@ -7,7 +7,7 @@ import { activeThemeMode, colors, isThemeMode, setTheme, setThemeMode, theme, TH
 import { loadPrefs, savePrefs } from "./prefs"
 import { Feed } from "./components/feed"
 import { Sidebar } from "./components/sidebar"
-import { LAYOUT, SIDEBAR_WIDTH } from "./layout"
+import { LAYOUT, SIDEBAR_HIDE_BELOW, SIDEBAR_WIDTH } from "./layout"
 import { Header } from "./components/topbar"
 import { Landing } from "./components/landing"
 import { Composer, type Inject } from "./components/composer"
@@ -65,19 +65,14 @@ export function App(props: { chat: Chat }) {
     if (leaderTimer) clearTimeout(leaderTimer)
   })
 
-  // Narrow terminals drop the sidebar automatically.
+  // Narrow terminals drop the sidebar automatically; a manual ctrl+b choice
+  // wins and survives later resizes.
   let manualSidebar = false
-  let wasBelow = false
   createEffect(
     on(
       () => dims().width,
       (width) => {
-        const below = width < LAYOUT.sidebar.autoHideBelow
-        if (below !== wasBelow) {
-          wasBelow = below
-          manualSidebar = false
-        }
-        if (!manualSidebar) setSidebar(!below)
+        if (!manualSidebar) setSidebar(width >= SIDEBAR_HIDE_BELOW)
       },
     ),
   )
@@ -91,6 +86,15 @@ export function App(props: { chat: Chat }) {
     manualSidebar = true
     setSidebar(next)
   }
+
+  // On a narrow terminal the sidebar floats above the chat instead of
+  // squeezing it, and selecting a session dismisses it.
+  const closeSidebarOverlay = () => {
+    manualSidebar = false
+    setSidebar(false)
+  }
+  const sidebarOverlay = () => sidebar() && dims().width < SIDEBAR_HIDE_BELOW
+  const sidebarInline = () => sidebar() && !sidebarOverlay()
 
   const flash = (text: string) => {
     setFlashNotice(text)
@@ -217,6 +221,11 @@ export function App(props: { chat: Chat }) {
   useKeyboard((key) => {
     if (props.chat.permission()) return // the permission dialog owns its keys
     if (overlay()) return // overlays own their keys
+    if (sidebarOverlay() && key.name === "escape") {
+      key.preventDefault()
+      closeSidebarOverlay()
+      return
+    }
 
     const ctrl = key.ctrl === true
     const name = key.name
@@ -707,7 +716,10 @@ export function App(props: { chat: Chat }) {
   }
 
   const contentWidth = () =>
-    Math.max(20, dims().width - (sidebar() ? SIDEBAR_WIDTH(dims().width) + LAYOUT.sidebar.gutter : 0))
+    Math.max(
+      20,
+      dims().width - (sidebarInline() ? SIDEBAR_WIDTH(dims().width) + LAYOUT.sidebar.gutter : 0),
+    )
 
   /** Gemini-style pill: 70% of the main area, clamped to a sane range. */
   const pillWidth = () => {
@@ -749,7 +761,7 @@ export function App(props: { chat: Chat }) {
         flexGrow={1}
         minHeight={0}
       >
-        <Show when={sidebar()}>
+        <Show when={sidebarInline()}>
           <Sidebar
             sessions={props.chat.sessions()}
             activeId={props.chat.activeId()}
@@ -759,6 +771,22 @@ export function App(props: { chat: Chat }) {
             onSelect={(id) => {
               setSidebarPicked(true)
               props.chat.select(id)
+            }}
+            onSettings={() => setOverlay({ kind: "settings" })}
+          />
+        </Show>
+        <Show when={sidebarOverlay()}>
+          <Sidebar
+            overlay
+            sessions={props.chat.sessions()}
+            activeId={props.chat.activeId()}
+            accent={accent()}
+            streaming={streaming()}
+            onNew={() => void props.chat.newChat()}
+            onSelect={(id) => {
+              setSidebarPicked(true)
+              props.chat.select(id)
+              closeSidebarOverlay()
             }}
             onSettings={() => setOverlay({ kind: "settings" })}
           />
@@ -810,7 +838,7 @@ export function App(props: { chat: Chat }) {
                   onCopy={copyText}
                 />
                 <ComposerBlock placement="above" />
-                <StatusBar metrics={metrics()} width={contentWidth()} version={info()?.version} />
+                <StatusBar metrics={metrics()} width={contentWidth()} version={info()?.version} sessionsHint={!sidebar()} />
               </box>
             }
           >
@@ -818,7 +846,7 @@ export function App(props: { chat: Chat }) {
               <Landing>
                 <ComposerBlock placement="below" />
               </Landing>
-              <StatusBar metrics={metrics()} width={contentWidth()} version={info()?.version} />
+              <StatusBar metrics={metrics()} width={contentWidth()} version={info()?.version} sessionsHint={!sidebar()} />
             </box>
           </Show>
         </box>
