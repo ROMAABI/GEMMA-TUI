@@ -38,10 +38,16 @@ async function main() {
     await chat.loadModels()
     await chat.loadProviders()
     await chat.loadCommands()
-    const wanted = process.env.GEMMA_SESSION_ID || prefs.sessionId
-    if (wanted) {
-      const session = chat.sessions().find((s) => s.id === wanted)
+    // Default: a fresh New chat is selected by chat.load(). Only an explicit
+    // session id or --continue reopens an existing conversation.
+    const explicit = process.env.GEMMA_SESSION_ID
+    const wantsContinue = process.env.GEMMA_CONTINUE === "1"
+    if (explicit) {
+      const session = chat.sessions().find((item) => item.id === explicit)
       if (session) chat.select(session.id)
+    } else if (wantsContinue) {
+      const last = chat.sessions().find((item) => item.messages.length > 0) ?? chat.sessions()[0]
+      if (last) chat.select(last.id)
     }
   } catch (error) {
     renderError(error instanceof Error ? error.message : String(error))

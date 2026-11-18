@@ -88,6 +88,10 @@ function nextId(prefix: string): string {
   return `${prefix}${Date.now().toString(36)}${counter.toString(36)}`
 }
 
+/** Local placeholder sessions have no server row until the first send. */
+const LOCAL_SESSION_PREFIX = "local-"
+const isLocalSession = (id: string): boolean => id.startsWith(LOCAL_SESSION_PREFIX)
+
 export function textOf(parts: Part[]): string {
   return parts
     .filter((part): part is Extract<Part, { kind: "text" }> => part.kind === "text")
@@ -268,12 +272,7 @@ export function createChat(client: GemmaClient) {
     const serverInfo = await client.info()
     setInfo(serverInfo)
 
-    let metas = await client.sessions()
-    if (metas.length === 0) {
-      const id = await client.createSession()
-      metas = [{ id, title: "New chat", updated_at: new Date().toISOString(), message_count: 0 }]
-    }
-
+    const metas = await client.sessions()
     const details = await Promise.all(
       metas.map(async (meta) => {
         try {
@@ -292,8 +291,18 @@ export function createChat(client: GemmaClient) {
         messages: fromServer(detail.messages),
       }))
 
-    setSessions(loaded)
-    setActiveId((prev) => (loaded.some((session) => session.id === prev) ? prev : (loaded[0]?.id ?? "")))
+    // Every launch starts on a fresh, empty chat. Reuse an existing empty
+    // server session when there is one, otherwise keep a purely local one
+    // until the first message is actually sent (no DB row before then).
+    const empty = loaded.find((session) => session.messages.length === 0)
+    const starter: Session = empty ?? {
+      id: nextId("local-"),
+      title: "New chat",
+      updatedAt: new Date().toISOString(),
+      messages: [],
+    }
+    setSessions([starter, ...loaded.filter((session) => session.id !== starter.id)])
+    setActiveId(starter.id)
   }
 
   async function loadModels(): Promise<ModelList | null> {
@@ -325,15 +334,26 @@ export function createChat(client: GemmaClient) {
   }
 
   async function newChat(): Promise<void> {
-    try {
-      const id = await client.createSession()
-      const now = new Date().toISOString()
-      setSessions((prev) => [{ id, title: "New chat", updatedAt: now, messages: [] }, ...prev])
-      setActiveId(id)
+    // Reuse an existing empty chat instead of piling up "New chat" DB rows.
+    const empty = sessions().find((session) => session.messages.length === 0)
+    if (empty) {
+      setSessions((prev) => [
+        { ...empty, title: "New chat", updatedAt: new Date().toISOString() },
+        ...prev.filter((session) => session.id !== empty.id),
+      ])
+      setActiveId(empty.id)
       setNotice(null)
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error))
+      return
     }
+    const local: Session = {
+      id: nextId(LOCAL_SESSION_PREFIX),
+      title: "New chat",
+      updatedAt: new Date().toISOString(),
+      messages: [],
+    }
+    setSessions((prev) => [local, ...prev])
+    setActiveId(local.id)
+    setNotice(null)
   }
 
   function select(id: string): void {
@@ -600,10 +620,26 @@ export function createChat(client: GemmaClient) {
     startedAt: number
   } | null> {
     const text = raw.trim()
-    const session = activeSession()
-    if (!text || streamingFlag || !session) return null
+    const current = activeSession()
+    if (!text || streamingFlag || !current) return null
 
-    const sessionId = session.id
+    // A local placeholder becomes a real session only when the first message
+    // is sent, so empty chats never pile up in the database.
+    let session = current
+    let sessionId = session.id
+    if (isLocalSession(sessionId)) {
+      try {
+        const realId = await client.createSession()
+        session = { ...session, id: realId }
+        sessionId = realId
+        setSessions((prev) => prev.map((item) => (item.id === current.id ? session : item)))
+        setActiveId(realId)
+      } catch (error) {
+        setNotice(error instanceof Error ? error.message : String(error))
+        return null
+      }
+    }
+
     const now = new Date().toISOString()
     const userMessage: Message = {
       id: nextId("u"),

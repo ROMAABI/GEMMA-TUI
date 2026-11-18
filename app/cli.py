@@ -99,7 +99,12 @@ def _opentui_ready(bun: str | None) -> bool:
     return bool(bun) and (TUI_DIR / "src" / "index.tsx").exists() and (TUI_DIR / "node_modules").exists()
 
 
-def _run_opentui(settings: Settings, session_id: str | None = None) -> bool:
+def _run_opentui(
+    settings: Settings,
+    session_id: str | None = None,
+    *,
+    continue_last: bool = False,
+) -> bool:
     """Start the shared server and hand the terminal to the OpenTUI client.
 
     Returns False when the client cannot run, so the caller can fall back to the
@@ -128,6 +133,8 @@ def _run_opentui(settings: Settings, session_id: str | None = None) -> bool:
         env["GEMMA_PAIR_URL"] = pair
         if session_id:
             env["GEMMA_SESSION_ID"] = session_id
+        elif continue_last:
+            env["GEMMA_CONTINUE"] = "1"
 
         started = time.monotonic()
         try:
@@ -156,6 +163,9 @@ def _run_opentui(settings: Settings, session_id: str | None = None) -> bool:
 def main(
     ctx: typer.Context,
     session: str | None = typer.Option(None, "--session", "-s", help="Open an existing session id."),
+    continue_last: bool = typer.Option(
+        False, "--continue", "-c", help="Open the last session instead of a fresh New chat."
+    ),
     model: str | None = typer.Option(None, "--model", "-m", help="Use a model alias."),
     classic: bool = typer.Option(
         False,
@@ -178,7 +188,7 @@ def main(
         # (or one owned by another tool) stays up after the TUI exits.
         atexit.register(stop_llama_server)
 
-    if not classic and _run_opentui(settings, session):
+    if not classic and _run_opentui(settings, session, continue_last=continue_last):
         return
     if not classic:
         console.print("[dim]Falling back to the classic TUI (gemma --classic).[/dim]")

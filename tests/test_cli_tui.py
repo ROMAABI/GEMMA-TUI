@@ -30,7 +30,7 @@ class _FakeTUI:
 
 def test_default_launches_opentui(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
-    monkeypatch.setattr(cli, "_run_opentui", lambda settings, session=None: calls.append("opentui") or True)
+    monkeypatch.setattr(cli, "_run_opentui", lambda settings, session=None, **_kwargs: calls.append("opentui") or True)
     def fake_tui(**_kwargs):
         calls.append("classic")
         return _FakeTUI()
@@ -45,7 +45,7 @@ def test_default_launches_opentui(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_classic_skips_opentui(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
-    monkeypatch.setattr(cli, "_run_opentui", lambda settings, session=None: calls.append("opentui") or True)
+    monkeypatch.setattr(cli, "_run_opentui", lambda settings, session=None, **_kwargs: calls.append("opentui") or True)
     def fake_tui(**_kwargs):
         calls.append("classic")
         return _FakeTUI()
@@ -60,7 +60,7 @@ def test_classic_skips_opentui(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_falls_back_when_opentui_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
-    monkeypatch.setattr(cli, "_run_opentui", lambda settings, session=None: False)
+    monkeypatch.setattr(cli, "_run_opentui", lambda settings, session=None, **_kwargs: False)
     def fake_tui(**_kwargs):
         calls.append("classic")
         return _FakeTUI()
@@ -90,7 +90,7 @@ def test_opentui_ready_needs_bun_and_install(tmp_path, monkeypatch: pytest.Monke
 def test_session_option_is_forwarded(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[str | None] = []
     monkeypatch.setattr(
-        cli, "_run_opentui", lambda settings, session=None: seen.append(session) or True
+        cli, "_run_opentui", lambda settings, session=None, **_kwargs: seen.append(session) or True
     )
 
     result = runner.invoke(cli.app, ["--session", "abc123"])
@@ -104,7 +104,7 @@ def test_does_not_stop_a_pre_existing_llama_server(monkeypatch: pytest.MonkeyPat
     registered: list[object] = []
     monkeypatch.setattr(atexit, "register", lambda fn, *a, **k: registered.append(fn))
     monkeypatch.setattr(cli, "server_is_healthy", lambda _url: True)
-    monkeypatch.setattr(cli, "_run_opentui", lambda settings, session=None: True)
+    monkeypatch.setattr(cli, "_run_opentui", lambda settings, session=None, **_kwargs: True)
 
     result = runner.invoke(cli.app, [])
 
@@ -116,9 +116,26 @@ def test_stops_the_llama_server_it_started(monkeypatch: pytest.MonkeyPatch) -> N
     registered: list[object] = []
     monkeypatch.setattr(atexit, "register", lambda fn, *a, **k: registered.append(fn))
     monkeypatch.setattr(cli, "server_is_healthy", lambda _url: False)
-    monkeypatch.setattr(cli, "_run_opentui", lambda settings, session=None: True)
+    monkeypatch.setattr(cli, "_run_opentui", lambda settings, session=None, **_kwargs: True)
 
     result = runner.invoke(cli.app, [])
 
     assert result.exit_code == 0, result.output
     assert registered == [cli.stop_llama_server]
+
+
+def test_continue_flag_is_forwarded(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[bool] = []
+
+    def fake_run(settings, session=None, *, continue_last=False):
+        seen.append(continue_last)
+        return True
+
+    monkeypatch.setattr(cli, "_run_opentui", fake_run)
+    result = runner.invoke(cli.app, ["--continue"])
+    assert result.exit_code == 0, result.output
+    assert seen == [True]
+
+    result = runner.invoke(cli.app, ["-c"])
+    assert result.exit_code == 0, result.output
+    assert seen == [True, True]

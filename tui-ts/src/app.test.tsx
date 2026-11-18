@@ -477,7 +477,8 @@ describe("OpenTUI client", () => {
     await new Promise((resolve) => setTimeout(resolve, 100))
     await setup.renderOnce()
 
-    expect(chat.activeId()).toBe("s2")
+    // New chat reuses the existing empty session, no new DB row is made.
+    expect(chat.activeId()).toBe("s1")
   })
 
   test("streams a chat reply into the feed", async () => {
@@ -987,8 +988,8 @@ describe("OpenTUI client", () => {
     setup.mockInput.pressKey("n")
     await new Promise((resolve) => setTimeout(resolve, 100))
     await setup.renderOnce()
-    expect(chat.sessions()[0]?.id).toBe("s2")
-    expect(chat.activeId()).toBe("s2")
+    expect(chat.sessions()[0]?.id).toBe("s1")
+    expect(chat.activeId()).toBe("s1")
   })
 
   test("mints a browser pairing link with Ctrl+W", async () => {
@@ -1034,8 +1035,8 @@ describe("OpenTUI client", () => {
     // The session is created over HTTP, so give the fetch a real tick to land.
     await new Promise((resolve) => setTimeout(resolve, 100))
     await setup.renderOnce()
-    expect(chat.sessions()[0]?.id).toBe("s2")
-    expect(chat.activeId()).toBe("s2")
+    expect(chat.sessions()[0]?.id).toBe("s1")
+    expect(chat.activeId()).toBe("s1")
   })
 
   test("Ctrl+P opens the slash palette inside a chat", async () => {
