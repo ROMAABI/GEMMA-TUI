@@ -100,6 +100,7 @@ class SessionStore:
                 "summary": "text",
                 "tokens": "integer not null default 0",
                 "metadata": "text not null default '{}'",
+                "title_manual": "integer not null default 0",
             },
             "messages": {
                 "metadata": "text not null default '{}'",
@@ -187,10 +188,8 @@ class SessionStore:
                 (session_id, role, content, payload, tool_call_id, name),
             )
             conn.execute(
-                "update sessions set title = case when title = 'New chat' and ? = 'user' "
-                "then substr(?, 1, 60) else title end, "
-                "updated_at = current_timestamp where id = ?",
-                (role, content.replace("\n", " "), session_id),
+                "update sessions set updated_at = current_timestamp where id = ?",
+                (session_id,),
             )
             return int(cursor.lastrowid or 0)
 
@@ -282,11 +281,71 @@ class SessionStore:
         return str(row["summary"] or "") if row else ""
 
     def rename_session(self, session_id: str, title: str) -> None:
+        """Rename a session explicitly; auto-titles will never overwrite it."""
         with self._connect() as conn:
             conn.execute(
-                "update sessions set title = ?, updated_at = current_timestamp where id = ?",
+                "update sessions set title = ?, title_manual = 1, "
+                "updated_at = current_timestamp where id = ?",
                 (title[:60], session_id),
             )
+
+    def set_auto_title(self, session_id: str, title: str) -> bool:
+        """Store a generated title, unless the user renamed this session."""
+        with self._connect() as conn:
+            cur = conn.execute(
+                "update sessions set title = ?, updated_at = current_timestamp "
+                "where id = ? and title_manual = 0",
+                (title[:60], session_id),
+            )
+            return cur.rowcount > 0
+
+    def is_title_manual(self, session_id: str) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                "select title_manual from sessions where id = ?", (session_id,)
+            ).fetchone()
+        return bool(row and row["title_manual"])
+
+    def first_exchange(self, session_id: str) -> tuple[str, str]:
+        """Return the first user message and first assistant reply."""
+        with self._connect() as conn:
+            user = conn.execute(
+                "select content from messages where session_id = ? and role = 'user' "
+                "order by id limit 1",
+                (session_id,),
+            ).fetchone()
+            reply = conn.execute(
+                "select content from messages where session_id = ? and role = 'assistant' "
+                "order by id limit 1",
+                (session_id,),
+            ).fetchone()
+        return (
+            str(user["content"] or "") if user else "",
+            str(reply["content"] or "") if reply else "",
+        )
+
+    def needs_auto_title(self, session_id: str) -> bool:
+        session = self.get_session(session_id)
+        if session is None or self.is_title_manual(session_id):
+            return False
+        first, _ = self.first_exchange(session_id)
+        clean = " ".join(first.split())
+        if not clean:
+            return False
+        if session.title in ("", "New chat"):
+            return True
+        return session.title in (clean[:60], clean[:47] + "…", clean[:47] + "...")
+
+    def sessions_needing_titles(self) -> list[str]:
+        """Sessions whose title is still the raw first-message placeholder."""
+        with self._connect() as conn:
+            ids = [
+                str(row["id"])
+                for row in conn.execute(
+                    "select id from sessions where title_manual = 0 order by updated_at desc"
+                ).fetchall()
+            ]
+        return [session_id for session_id in ids if self.needs_auto_title(session_id)]
 
     def delete_session(self, session_id: str) -> None:
         with self._connect() as conn:
@@ -300,8 +359,8 @@ class SessionStore:
             conn.execute("delete from messages where session_id = ?", (session_id,))
             conn.execute("delete from events where session_id = ?", (session_id,))
             conn.execute(
-                "update sessions set title = 'New chat', updated_at = current_timestamp "
-                "where id = ?",
+                "update sessions set title = 'New chat', title_manual = 0, "
+                "updated_at = current_timestamp where id = ?",
                 (session_id,),
             )
 

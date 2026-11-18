@@ -89,7 +89,9 @@ def test_session_crud_api(web) -> None:
         store.add_message(session_id, "user", "hello from the tui")
         sessions = client.get("/api/sessions").json()["sessions"]
         row = next(item for item in sessions if item["id"] == session_id)
-        assert row["title"] == "hello from the tui"
+        # Titles are generated in the background; a plain first message no
+        # longer becomes the session title.
+        assert row["title"] == "New chat"
         assert row["message_count"] == 1
         assert row["updated_at"].endswith("Z")
 

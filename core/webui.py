@@ -123,6 +123,17 @@ class GemmaWebServer:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self.agent = AgentRuntime(settings, self.store)
+        self._chat_inflight = 0
+        self._inflight_lock = threading.Lock()
+        from core.titles import TitleManager
+
+        self.titles = TitleManager(
+            self.store,
+            self.settings,
+            lambda: bool(self.agent.active_runs())
+            or bool(self._chat_inflight)
+            or self.titles.busy(),
+        )
 
     # ── lifecycle ───────────────────────────────────────────────────────
     @property
@@ -151,6 +162,7 @@ class GemmaWebServer:
             target=httpd.serve_forever, name="gemma-web", daemon=True
         )
         self._thread.start()
+        self.titles.start_migration()
         if self.open_on_start:
             webbrowser.open(self.new_pairing_url())
         return self.base_url
@@ -165,6 +177,7 @@ class GemmaWebServer:
         self._thread = None
         if thread is not None:
             thread.join(timeout=5)
+        self.titles.stop()
         self.agent.close()
         self._stop.set()
 
@@ -210,6 +223,16 @@ class GemmaWebServer:
             messages.insert(1, {"role": "system", "content": context})
         return messages
 
+    def queue_title(self, session_id: str, reply: str) -> None:
+        """Kick off a background title after an assistant reply is stored."""
+        first, _ = self.store.first_exchange(session_id)
+        if not first or not reply.strip():
+            return
+        messages = self.store.messages(session_id)
+        exchange = sum(1 for item in messages if item.get("role") == "user")
+        self.titles.submit(session_id, first, reply[:300], exchange=exchange)
+        self.titles.maybe_refresh_drift(session_id, exchange)
+
     async def _pump_chat(self, handler: "_Handler", session_id: str, context: str = "") -> None:
         client = LlamaClient(self.settings)
         started = time.monotonic()
@@ -231,6 +254,7 @@ class GemmaWebServer:
             ttft = (first_at - started) if first_at else elapsed
             if text.strip():
                 self.store.add_message(session_id, "assistant", text)
+                self.queue_title(session_id, text)
             handler.emit(
                 {
                     "type": "done",
@@ -607,6 +631,8 @@ class _Handler(BaseHTTPRequestHandler):
                 continue
             if event is None:
                 break
+            if event.get("type") == "complete" and isinstance(event.get("content"), str):
+                self.gemma.queue_title(run.session_id, event["content"])
             try:
                 self.emit(event)
             except (BrokenPipeError, ConnectionResetError):
@@ -1090,6 +1116,8 @@ class _Handler(BaseHTTPRequestHandler):
             session_id = self.gemma.store.create_session()
         self.gemma.store.add_message(session_id, "user", message)
         context = str(body.get("context") or "").strip()
+        with self.gemma._inflight_lock:
+            self.gemma._chat_inflight += 1
 
         # The stream has no Content-Length, so the response ends when the
         # connection closes: keep-alive would leave the browser waiting.
@@ -1105,6 +1133,9 @@ class _Handler(BaseHTTPRequestHandler):
             asyncio.run(self.gemma._pump_chat(self, session_id, context))
         except (BrokenPipeError, ConnectionResetError):
             pass
+        finally:
+            with self.gemma._inflight_lock:
+                self.gemma._chat_inflight -= 1
 
     def emit(self, payload: dict[str, Any]) -> None:
         data = f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")

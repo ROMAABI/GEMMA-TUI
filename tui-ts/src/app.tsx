@@ -35,6 +35,7 @@ export function App(props: { chat: Chat }) {
   const dims = useTerminalDimensions()
 
   const [sidebar, setSidebar] = createSignal(true)
+  const [sidebarPicked, setSidebarPicked] = createSignal(false)
   const [overlay, setOverlay] = createSignal<Overlay>(null)
   const [focusSignal, setFocusSignal] = createSignal(0)
   const [inject, setInject] = createSignal<Inject | null>(null)
@@ -219,6 +220,7 @@ export function App(props: { chat: Chat }) {
     const ctrl = key.ctrl === true
     const name = key.name
     const composer = composerState
+    if (name !== "r") setSidebarPicked(false)
 
     if (leader()) {
       key.preventDefault()
@@ -302,6 +304,21 @@ export function App(props: { chat: Chat }) {
     if (name === "f1" || (ctrl && name === "h")) {
       key.preventDefault()
       setOverlay({ kind: "help" })
+      return
+    }
+
+    if (
+      !ctrl &&
+      name === "r" &&
+      sidebar() &&
+      composer.text.length === 0 &&
+      !composer.paletteOpen &&
+      sidebarPicked() &&
+      (activeSession()?.messages.length ?? 0) > 0
+    ) {
+      // Rename the selected sidebar session.
+      key.preventDefault()
+      setOverlay({ kind: "rename", initial: activeSession()?.title ?? "" })
       return
     }
 
@@ -517,6 +534,11 @@ export function App(props: { chat: Chat }) {
         return true
       }
       case "/rename":
+        if (arg.trim()) {
+          void props.chat.renameChat(arg.trim())
+          flash(`Renamed to ${arg.trim().slice(0, 24)}`)
+          return true
+        }
         setOverlay({ kind: "rename", initial: activeSession()?.title ?? "" })
         return true
       case "/delete":
@@ -733,7 +755,10 @@ export function App(props: { chat: Chat }) {
             accent={accent()}
             streaming={streaming()}
             onNew={() => void props.chat.newChat()}
-            onSelect={(id) => props.chat.select(id)}
+            onSelect={(id) => {
+              setSidebarPicked(true)
+              props.chat.select(id)
+            }}
             onSettings={() => setOverlay({ kind: "settings" })}
           />
         </Show>

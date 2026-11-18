@@ -61,10 +61,12 @@ export function Sidebar(props: {
         </box>
       </box>
 
-      <text style={{ fg: colors().muted }} height={1} flexShrink={0} marginTop={1}>
-        <b>Sessions</b>
-      </text>
-
+      <box flexDirection="row" height={1} flexShrink={0} marginTop={1} justifyContent="space-between">
+        <text style={{ fg: colors().muted }}>
+          <b>Sessions</b>
+        </text>
+        <text style={{ fg: colors().faint }}>r rename</text>
+      </box>
       <scrollbox
         height={listHeight()}
         flexShrink={0}

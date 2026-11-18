@@ -302,6 +302,7 @@ const KEYS: Array<[string, string]> = [
   ["Tab", "switch chat / agent"],
   ["Delete", "delete session (empty prompt)"],
   ["Ctrl+X N", "new session"],
+  ["R", "rename selected session"],
   ["Ctrl+X L", "server log (/logs)"],
   ["Ctrl+X V", "expand thinking blocks"],
   ["Ctrl+X M", "model picker"],

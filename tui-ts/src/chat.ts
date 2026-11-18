@@ -13,7 +13,7 @@ import {
   type ServerInfo,
   type ServerMessage,
 } from "./api"
-import { displayModelName, estimateTokens, titleFromPrompt } from "./format"
+import { displayModelName, estimateTokens } from "./format"
 
 export type ToolStatus = "running" | "done" | "error"
 
@@ -588,6 +588,11 @@ export function createChat(client: GemmaClient) {
     }
   }
 
+  // Titles arrive from a background model call after the first reply.
+  setInterval(() => {
+    if (!streamingFlag) void refreshTitles()
+  }, 4000)
+
   async function startTurn(raw: string): Promise<{
     session: Session
     sessionId: string
@@ -599,7 +604,6 @@ export function createChat(client: GemmaClient) {
     if (!text || streamingFlag || !session) return null
 
     const sessionId = session.id
-    const isFirst = session.messages.length === 0
     const now = new Date().toISOString()
     const userMessage: Message = {
       id: nextId("u"),
@@ -619,7 +623,7 @@ export function createChat(client: GemmaClient) {
 
     patchSession(sessionId, (current) => ({
       ...current,
-      title: isFirst ? titleFromPrompt(text) : current.title,
+      // "New chat" stays until the server's background title arrives.
       updatedAt: now,
       messages: [...current.messages, userMessage, assistantMessage],
     }))

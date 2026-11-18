@@ -2232,9 +2232,10 @@ class GemmaTUI(App):
 
     async def _auto_title(self, source: str) -> None:
         try:
-            title = await suggest_title(self.client, source)
+            _, reply = self.store.first_exchange(self.session_id)
+            title = await suggest_title(self.client, source, reply)
             if title:
-                self.store.rename_session(self.session_id, title)
+                self.store.set_auto_title(self.session_id, title)
                 self.refresh_sessions()
         except Exception:
             pass
