@@ -18,6 +18,7 @@ import json
 import queue
 import secrets
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -26,6 +27,7 @@ from core.agent import AgentOrchestrator
 from core.permissions import PermissionManager, PermissionRequest, PermissionRule, parse_rule
 from core.tooling import build_default_registry
 from sessions.store import SessionStore
+from utils import runlog
 
 
 @dataclass
@@ -34,6 +36,7 @@ class AgentRun:
 
     run_id: str
     session_id: str
+    created: float = field(default_factory=time.monotonic)
     events: "queue.Queue[dict[str, Any] | None]" = field(default_factory=queue.Queue)
     future: Any = None
     aborted: bool = False
@@ -319,8 +322,27 @@ class AgentRuntime:
 
     async def _execute(self, run: AgentRun, context: str = "") -> None:
         token = _CURRENT_RUN.set(run)
+        entered = time.monotonic()
+        runlog.log(
+            {
+                "type": "stage",
+                "stage": "queue",
+                "ms": round((entered - run.created) * 1000, 1),
+                "run_id": run.run_id,
+            }
+        )
         try:
+            integrations_start = time.monotonic()
             registry = await self._ensure_integrations()
+            integrations_ms = (time.monotonic() - integrations_start) * 1000
+            runlog.log(
+                {
+                    "type": "stage",
+                    "stage": "integrations",
+                    "ms": round(integrations_ms, 1),
+                    "run_id": run.run_id,
+                }
+            )
             orchestrator = AgentOrchestrator(
                 client=None,
                 settings=self.settings,
@@ -338,11 +360,29 @@ class AgentRuntime:
             # Prime the model's prompt cache with the (large) agent prefix so
             # the first streaming step doesn't re-prefill it from scratch.
             warmup = getattr(orchestrator, "warmup", None)
-            if callable(warmup):
+            if getattr(self.settings, "agent_warmup", True) and callable(warmup):
+                warmup_start = time.monotonic()
                 try:
                     await warmup()
                 except Exception:  # noqa: BLE001 - warmup must never break a run
                     pass
+                finally:
+                    runlog.log(
+                        {
+                            "type": "stage",
+                            "stage": "warmup",
+                            "ms": round((time.monotonic() - warmup_start) * 1000, 1),
+                            "run_id": run.run_id,
+                        }
+                    )
+            runlog.log(
+                {
+                    "type": "stage",
+                    "stage": "setup_total",
+                    "ms": round((time.monotonic() - entered) * 1000, 1),
+                    "run_id": run.run_id,
+                }
+            )
             async for event in orchestrator.run(messages):
                 if run.aborted:
                     break

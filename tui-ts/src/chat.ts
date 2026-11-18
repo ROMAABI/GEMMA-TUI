@@ -42,6 +42,10 @@ export interface Message {
   ttft?: number
   /** Generation tokens reported by the provider, when available. */
   tokens?: number
+  /** Real generation time reported by the provider, for a consistent tok/s. */
+  genMs?: number
+  /** Total tool execution time in this turn. */
+  toolMs?: number
   stopped?: boolean
   error?: string
   /** Web-search state for this turn: status line while running, sources after. */
@@ -158,7 +162,33 @@ function fromServer(messages: ServerMessage[]): Message[] {
       createdAt: item.created_at,
     })
   }
-  return out
+
+  // A tool step and the final answer are stored as separate assistant rows.
+  // Show them as one card: one "gemma" header, one stats line at the end.
+  const merged: Message[] = []
+  for (const message of out) {
+    const previous = merged[merged.length - 1]
+    if (
+      previous &&
+      previous.role === "assistant" &&
+      message.role === "assistant" &&
+      previous.parts.some((part) => part.kind === "tool")
+    ) {
+      merged[merged.length - 1] = {
+        ...previous,
+        content: message.content || previous.content,
+        parts: [
+          ...previous.parts,
+          ...message.parts.filter((part) => part.kind !== "tool" || !previous.parts.some(
+            (existing) => existing.kind === "tool" && existing.id === part.id,
+          )),
+        ],
+      }
+      continue
+    }
+    merged.push(message)
+  }
+  return merged
 }
 
 export function createChat(client: GemmaClient) {
@@ -166,6 +196,7 @@ export function createChat(client: GemmaClient) {
   const [activeId, setActiveId] = createSignal("")
   const [streaming, setStreaming] = createSignal(false)
   const [streamingId, setStreamingId] = createSignal<string | null>(null)
+  const [showThinking, setShowThinking] = createSignal(false)
   const [info, setInfo] = createSignal<ServerInfo | null>(null)
   const [models, setModels] = createSignal<ModelList | null>(null)
   const [providers, setProviders] = createSignal<ProviderCatalog | null>(null)
@@ -176,7 +207,7 @@ export function createChat(client: GemmaClient) {
   const [connected, setConnected] = createSignal<boolean | null>(null)
   const [permission, setPermission] = createSignal<AgentEvent | null>(null)
   const [runId, setRunId] = createSignal<string | null>(null)
-  const [live, setLive] = createSignal<{ tokens: number; elapsed: number; ttft: number }>({
+  const [live, setLive] = createSignal<{ tokens: number; elapsed: number; ttft: number; genMs?: number }>({
     tokens: 0,
     elapsed: 0,
     ttft: 0,
@@ -542,6 +573,8 @@ export function createChat(client: GemmaClient) {
           message.elapsed = prior.elapsed
           message.ttft = prior.ttft
           message.tokens = prior.tokens
+          message.genMs = prior.genMs
+          message.toolMs = prior.toolMs
         }
       }
       patchSession(sessionId, (current) => ({
@@ -776,6 +809,7 @@ export function createChat(client: GemmaClient) {
     const { sessionId, assistantId, startedAt } = turn
     let firstAt: number | null = null
     let tokens = 0
+    let genMs = 0
     let stopped = false
     let failure: string | null = null
     let currentRun = ""
@@ -802,6 +836,18 @@ export function createChat(client: GemmaClient) {
                 currentRun = event.run_id ?? ""
                 setRunId(currentRun)
                 break
+              case "text_replace": {
+                // The model emitted tool-call markup as text; the server
+                // recovered the call and now sends the prose-only version.
+                const replacement = typeof event.content === "string" ? event.content : ""
+                update((message) => {
+                  const parts = [...message.parts]
+                  while (parts.length && parts[parts.length - 1]?.kind === "text") parts.pop()
+                  if (replacement) parts.push({ kind: "text", text: replacement })
+                  return { ...message, parts, content: textOf(parts) }
+                })
+                break
+              }
               case "text": {
                 const chunk = typeof event.content === "string" ? event.content : ""
                 if (!chunk) break
@@ -829,20 +875,35 @@ export function createChat(client: GemmaClient) {
               }
               case "tool_start": {
                 const info = (event.content ?? {}) as Record<string, unknown>
-                update((message) => ({
-                  ...message,
-                  parts: [
-                    ...message.parts,
-                    {
-                      kind: "tool",
-                      id: String(info.id ?? nextId("t")),
-                      name: String(info.name ?? "tool"),
-                      args: parseArgs(info.args),
-                      status: "running",
-                      startedAt: Date.now(),
-                    },
-                  ],
-                }))
+                update((message) => {
+                  // Clear the stream buffer when a tool starts: a stray short
+                  // text fragment (the "3" in the screenshot) must never sit
+                  // on the tool line. Reasoning stays as its own collapsed
+                  // block, which the user can expand after the turn.
+                  const parts = [...message.parts]
+                  const last = parts[parts.length - 1]
+                  if (
+                    last?.kind === "text" &&
+                    last.text.trim().length <= 1 &&
+                    !message.parts.some((part) => part.kind === "tool")
+                  ) {
+                    parts.pop()
+                  }
+                  return {
+                    ...message,
+                    parts: [
+                      ...parts,
+                      {
+                        kind: "tool",
+                        id: String(info.id ?? nextId("t")),
+                        name: String(info.name ?? "tool"),
+                        args: parseArgs(info.args),
+                        status: "running",
+                        startedAt: Date.now(),
+                      },
+                    ],
+                  }
+                })
                 break
               }
               case "tool_finish": {
@@ -867,10 +928,13 @@ export function createChat(client: GemmaClient) {
                 const info = (event.content ?? {}) as Record<string, unknown>
                 const output = Number(info.output_tokens ?? 0)
                 if (output > 0) tokens = Math.max(tokens, output)
+                const eventGenMs = Number(info.gen_ms ?? 0)
+                if (eventGenMs > 0) genMs = eventGenMs
                 setLive({
                   tokens,
                   elapsed: (performance.now() - startedAt) / 1000,
                   ttft: firstAt ? (firstAt - startedAt) / 1000 : 0,
+                  genMs: eventGenMs > 0 ? eventGenMs : undefined,
                 })
                 break
               }
@@ -905,19 +969,32 @@ export function createChat(client: GemmaClient) {
       )
 
       const elapsed = (performance.now() - startedAt) / 1000
-      update((message) => ({
-        ...message,
-        elapsed,
-        ttft: firstAt ? (firstAt - startedAt) / 1000 : elapsed,
-        tokens: tokens || undefined,
-        stopped: stopped || message.stopped,
-        error: failure ?? message.error,
-      }))
+      update((message) => {
+        const toolMs = message.parts.reduce(
+          (sum, part) =>
+            part.kind === "tool" && part.finishedAt && part.startedAt
+              ? sum + (part.finishedAt - part.startedAt)
+              : sum,
+          0,
+        )
+        return {
+          ...message,
+          elapsed,
+          ttft: firstAt ? (firstAt - startedAt) / 1000 : elapsed,
+          tokens: tokens || undefined,
+          genMs: genMs || undefined,
+          toolMs: toolMs || undefined,
+          stopped: stopped || message.stopped,
+          error: failure ?? message.error,
+        }
+      })
+      finishTurn()
       await reconcile(sessionId)
       void refreshTitles()
     } catch (error) {
       const aborted = stopped || (error instanceof DOMException && error.name === "AbortError")
       applyFailure(sessionId, assistantId, error, "", aborted)
+      finishTurn()
       await reconcile(sessionId)
     } finally {
       finishTurn()
@@ -961,13 +1038,18 @@ export function createChat(client: GemmaClient) {
     const temperature = serverInfo?.temperature ?? 0.7
 
     if (streaming()) {
-      const { tokens, elapsed, ttft } = live()
+      const { tokens, elapsed, ttft, genMs } = live()
+      const genSeconds = (genMs ?? 0) / 1000
       return {
         contextUsed,
         contextMax,
         tokens,
         elapsed,
-        tokPerSec: ttft > 0 ? tokens / Math.max(elapsed - ttft, 0.001) : 0,
+        tokPerSec: genSeconds > 0
+          ? tokens / genSeconds
+          : ttft > 0
+            ? tokens / Math.max(elapsed - ttft, 0.001)
+            : 0,
         provider,
         temperature,
         websearch: websearch(),
@@ -990,14 +1072,14 @@ export function createChat(client: GemmaClient) {
       }
     }
     const elapsed = lastAssistant.elapsed ?? 0
-    const ttft = lastAssistant.ttft ?? 0
-    const tokens = estimateTokens(lastAssistant.content)
+    const genSeconds = (lastAssistant.genMs ?? 0) / 1000
+    const tokens = lastAssistant.tokens ?? estimateTokens(lastAssistant.content)
     return {
       contextUsed,
       contextMax,
       tokens,
       elapsed,
-      tokPerSec: elapsed > ttft ? tokens / (elapsed - ttft) : 0,
+      tokPerSec: genSeconds > 0 ? tokens / genSeconds : 0,
       provider,
       temperature,
       websearch: websearch(),
@@ -1041,6 +1123,8 @@ export function createChat(client: GemmaClient) {
     websearch,
     setWebsearch,
     toggleWebsearch,
+    showThinking,
+    toggleThinking: () => setShowThinking((value) => !value),
     connected,
     compactChat,
     send,

@@ -18,10 +18,12 @@ import {
   ThemePicker,
   SettingsOverlay,
   PermissionOverlay,
+  LogsOverlay,
 } from "./components/overlays"
 
 type Overlay =
   | null
+  | { kind: "logs" }
   | { kind: "model" }
   | { kind: "theme" }
   | { kind: "help" }
@@ -39,6 +41,7 @@ export function App(props: { chat: Chat }) {
   const [flashNotice, setFlashNotice] = createSignal<string | null>(null)
   const [pairLink, setPairLink] = createSignal<string | null>(null)
   const [leader, setLeader] = createSignal(false)
+  const composerState = { text: "", paletteOpen: false }
 
   const activeSession = createMemo(() => props.chat.activeSession())
   const streaming = createMemo(() => props.chat.streaming())
@@ -159,16 +162,25 @@ export function App(props: { chat: Chat }) {
     leaderTimer = setTimeout(() => setLeader(false), 1600)
   }
 
+  const openModelPicker = () => {
+    if (streaming()) flash("Stop the current reply before switching models")
+    else setOverlay({ kind: "model" })
+  }
+
   const runLeader = (name: string) => {
     switch (name) {
       case "n":
         void props.chat.newChat()
         break
       case "l":
-        toggleSidebar()
+        setOverlay({ kind: "logs" })
+        break
+      case "v":
+        props.chat.toggleThinking()
+        flash(props.chat.showThinking() ? "Thinking expanded" : "Thinking collapsed")
         break
       case "m":
-        if (!streaming()) setOverlay({ kind: "model" })
+        openModelPicker()
         break
       case "t":
         setOverlay({ kind: "theme" })
@@ -206,6 +218,7 @@ export function App(props: { chat: Chat }) {
 
     const ctrl = key.ctrl === true
     const name = key.name
+    const composer = composerState
 
     if (leader()) {
       key.preventDefault()
@@ -241,6 +254,8 @@ export function App(props: { chat: Chat }) {
     }
 
     if (ctrl && name === "n") {
+      // While the slash palette is open, Ctrl+N walks the list instead.
+      if (composer.paletteOpen) return
       key.preventDefault()
       void props.chat.newChat()
       return
@@ -271,6 +286,8 @@ export function App(props: { chat: Chat }) {
     }
 
     if (ctrl && name === "p") {
+      // The palette owns Ctrl+P as "previous entry" once it is open.
+      if (composer.paletteOpen) return
       key.preventDefault()
       injectText("/")
       return
@@ -278,7 +295,7 @@ export function App(props: { chat: Chat }) {
 
     if (ctrl && name === "k") {
       key.preventDefault()
-      if (!streaming()) setOverlay({ kind: "model" })
+      openModelPicker()
       return
     }
 
@@ -289,12 +306,16 @@ export function App(props: { chat: Chat }) {
     }
 
     if (name === "delete") {
+      // Delete edits the draft; only an empty prompt deletes the session.
+      if (composer.text.length > 0) return
       key.preventDefault()
       deleteActive()
       return
     }
 
     if (name === "escape") {
+      // The composer closes its own slash palette on Escape.
+      if (composer.paletteOpen) return
       key.preventDefault()
       setFocusSignal((prev) => prev + 1)
     }
@@ -517,6 +538,10 @@ export function App(props: { chat: Chat }) {
         )
         return true
       }
+      case "/logs": {
+        setOverlay({ kind: "logs" })
+        return true
+      }
       case "/sidebar": {
         if (arg === "show") setSidebarVisible(true)
         else if (arg === "hide") setSidebarVisible(false)
@@ -684,9 +709,8 @@ export function App(props: { chat: Chat }) {
       onStop={() => props.chat.stop()}
       onCommand={handleCommand}
       onToggleMode={() => props.chat.toggleMode()}
-      onModel={() => {
-        if (!streaming()) setOverlay({ kind: "model" })
-      }}
+      onModel={openModelPicker}
+      state={composerState}
     />
   )
 
@@ -745,7 +769,7 @@ export function App(props: { chat: Chat }) {
             <box flexShrink={0} paddingLeft={2} paddingRight={2} height={1}>
               <text style={{ fg: accent().accent }}>
                 <b>ctrl+x</b>
-                <span style={{ fg: colors().faint }}> n new · l list · m models · t theme · a mode · h help · q quit</span>
+                <span style={{ fg: colors().faint }}> n new · l logs · v thinking · m models · t theme · a mode · h help · q quit</span>
               </text>
             </box>
           </Show>
@@ -774,6 +798,9 @@ export function App(props: { chat: Chat }) {
         </box>
       </box>
 
+      <Show when={overlay()?.kind === "logs"}>
+        <LogsOverlay client={props.chat.client} accent={accent()} onClose={() => setOverlay(null)} />
+      </Show>
       <Show when={overlay()?.kind === "model"}>
         <ModelPicker
           providers={providers()}

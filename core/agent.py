@@ -263,6 +263,10 @@ class AgentOrchestrator:
             if event.type == "text":
                 state["text"].append(event.text)
                 yield AgentEvent("text", event.text)
+            elif event.type == "text_replace":
+                # Tool-call XML arrived as text; keep only the real prose.
+                state["text"] = [event.text] if event.text else []
+                yield AgentEvent("text_replace", event.text)
             elif event.type == "reasoning":
                 state["reasoning"].append(event.text)
                 yield AgentEvent("reasoning", event.text)
@@ -270,7 +274,22 @@ class AgentOrchestrator:
                 state["tool_calls"] = event.tool_calls
             elif event.type == "usage":
                 state["usage"].update(event.usage)
-                yield AgentEvent("usage", event.usage)
+                completion = event.usage.get("output_tokens")
+                if isinstance(completion, int):
+                    state["gen_tokens_total"] += completion
+                gen_ms = event.usage.get("gen_ms")
+                if isinstance(gen_ms, (int, float)):
+                    state["gen_ms_total"] += float(gen_ms)
+                # Cumulative across tool steps: one stats line for the whole
+                # turn, computed from the same generation counters everywhere.
+                yield AgentEvent(
+                    "usage",
+                    {
+                        **event.usage,
+                        "output_tokens": state["gen_tokens_total"],
+                        "gen_ms": round(state["gen_ms_total"], 1),
+                    },
+                )
             elif event.type == "done":
                 state["finish_reason"] = event.finish_reason
 
@@ -325,6 +344,8 @@ class AgentOrchestrator:
         tool_ms = 0.0
         tool_count = 0
         finish_label = "complete"
+        turn_gen_tokens = 0
+        turn_gen_ms = 0.0
 
         # Latency audit helper: one record per turn, whatever the exit path.
         def log_turn(outcome: str) -> None:
@@ -376,6 +397,8 @@ class AgentOrchestrator:
                 "tool_calls": [],
                 "usage": {},
                 "finish_reason": "",
+                "gen_tokens_total": turn_gen_tokens,
+                "gen_ms_total": turn_gen_ms,
             }
 
             overflow_retry = False
@@ -417,6 +440,8 @@ class AgentOrchestrator:
                         "tool_calls": [],
                         "usage": {},
                         "finish_reason": "",
+                        "gen_tokens_total": turn_gen_tokens,
+                        "gen_ms_total": turn_gen_ms,
                     }
                 except NativeToolsUnsupported as exc:
                     yield AgentEvent(
@@ -431,6 +456,12 @@ class AgentOrchestrator:
                     yield AgentEvent("error", f"Model stream error: {type(exc).__name__}: {exc}")
                     log_turn("stream_error")
                     return
+
+            # Carry generation totals into the next tool step so the final
+            # usage event (and therefore both tok/s displays) covers the
+            # whole turn, not just the last provider call.
+            turn_gen_tokens = state["gen_tokens_total"]
+            turn_gen_ms = state["gen_ms_total"]
 
             text = "".join(state["text"])
             reasoning = "".join(state["reasoning"])

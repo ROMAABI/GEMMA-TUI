@@ -1,9 +1,12 @@
 import atexit
+import contextlib
 import os
 import shutil
 import subprocess
+import sys
 import time
 import webbrowser
+from dataclasses import dataclass
 from pathlib import Path
 
 import typer
@@ -13,6 +16,7 @@ from app.lifecycle import server_is_healthy, stop_llama_server
 from config.settings import Settings
 from sessions.store import SessionStore
 from tui.app import GemmaTUI
+from utils.paths import server_log_path
 
 app = typer.Typer(no_args_is_help=False, add_completion=False)
 console = Console()
@@ -38,6 +42,48 @@ def _ensure_server(base_url: str) -> bool:
 
 
 TUI_DIR = Path(__file__).resolve().parent.parent / "tui-ts"
+
+
+@dataclass
+class _LogRedirect:
+    """Result of ``_stdout_to_log``: where logs go and where the tty still is."""
+
+    log_path: Path
+    tty_fd: int
+
+
+@contextlib.contextmanager
+def _stdout_to_log():
+    """Send the process's stdout/stderr to the server log while active.
+
+    The web server runs in this same process, so anything it prints would
+    paint straight over the fullscreen TUI. File descriptors 1 and 2 are
+    pointed at the log file (which also catches every subprocess the server
+    spawns); the TUI child keeps the real terminal via the dup'd tty fd.
+    """
+    log_path = server_log_path()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    tty_fd = os.dup(1)
+    log_fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except (OSError, ValueError):
+        pass
+    os.dup2(log_fd, 1)
+    os.dup2(log_fd, 2)
+    os.close(log_fd)
+    try:
+        yield _LogRedirect(log_path=log_path, tty_fd=tty_fd)
+    finally:
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except (OSError, ValueError):
+            pass
+        os.dup2(tty_fd, 1)
+        os.dup2(tty_fd, 2)
+        os.close(tty_fd)
 
 
 def _find_bun() -> str | None:
@@ -72,29 +118,38 @@ def _run_opentui(settings: Settings, session_id: str | None = None) -> bool:
 
     from core.webui import GemmaWebServer
 
-    server = GemmaWebServer(settings)
-    base = server.start()
-    pair = server.new_pairing_url()
+    with _stdout_to_log() as redirect:
+        server = GemmaWebServer(settings)
+        base = server.start()
+        pair = server.new_pairing_url()
 
-    env = os.environ.copy()
-    env["GEMMA_URL"] = base
-    env["GEMMA_PAIR_URL"] = pair
-    if session_id:
-        env["GEMMA_SESSION_ID"] = session_id
+        env = os.environ.copy()
+        env["GEMMA_URL"] = base
+        env["GEMMA_PAIR_URL"] = pair
+        if session_id:
+            env["GEMMA_SESSION_ID"] = session_id
 
-    started = time.monotonic()
-    try:
-        completed = subprocess.run([bun, "run", "src/index.tsx"], cwd=TUI_DIR, env=env)
-    except KeyboardInterrupt:
-        completed = None
-    finally:
-        server.stop()
+        started = time.monotonic()
+        try:
+            # Explicit fds: bun renders on the real tty even though this
+            # process's own stdout/stderr now point at the log file.
+            completed = subprocess.run(
+                [bun, "run", "src/index.tsx"],
+                cwd=TUI_DIR,
+                env=env,
+                stdout=redirect.tty_fd,
+                stderr=redirect.tty_fd,
+            )
+        except KeyboardInterrupt:
+            completed = None
+        finally:
+            server.stop()
 
-    if completed is None:
-        return True
-    # A crash before the first frame means the client is unusable here; let the
-    # caller fall back to the classic TUI.
-    return completed.returncode == 0 or (time.monotonic() - started) > 2.0
+        if completed is None:
+            return True
+        # A crash before the first frame means the client is unusable here; let the
+        # caller fall back to the classic TUI.
+        return completed.returncode == 0 or (time.monotonic() - started) > 2.0
 
 
 @app.callback(invoke_without_command=True)

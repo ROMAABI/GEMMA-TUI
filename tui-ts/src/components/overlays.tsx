@@ -1,7 +1,7 @@
-import { For, Match, Show, Switch, createMemo, createSignal } from "solid-js"
+import { For, Match, Show, Switch, createMemo, createSignal, onMount } from "solid-js"
 import { useKeyboard, useTerminalDimensions } from "@opentui/solid"
 import type { InputRenderable } from "@opentui/core"
-import type { AgentEvent, CommandDef, ModelEntry, ModelList, Provider, ProviderCatalog } from "../api"
+import type { AgentEvent, CommandDef, GemmaClient, ModelEntry, ModelList, Provider, ProviderCatalog } from "../api"
 import { colors, previewTheme, THEMES, type ResolvedTheme, type ThemeMode } from "../theme"
 import { displayModelName, truncate } from "../format"
 
@@ -300,9 +300,10 @@ const KEYS: Array<[string, string]> = [
   ["Enter", "send message"],
   ["Shift+Enter", "new line"],
   ["Tab", "switch chat / agent"],
-  ["Delete", "delete current session"],
+  ["Delete", "delete session (empty prompt)"],
   ["Ctrl+X N", "new session"],
-  ["Ctrl+X L", "session list"],
+  ["Ctrl+X L", "server log (/logs)"],
+  ["Ctrl+X V", "expand thinking blocks"],
   ["Ctrl+X M", "model picker"],
   ["Ctrl+X T", "theme picker"],
   ["Ctrl+X A", "switch mode"],
@@ -313,8 +314,8 @@ const KEYS: Array<[string, string]> = [
   ["Ctrl+P", "command palette"],
   ["Ctrl+Y", "copy last reply"],
   ["Ctrl+W", "pair a browser"],
-  ["Ctrl+C", "stop, then quit"],
-  ["Esc", "focus the prompt"],
+  ["Ctrl+C", "stop streaming"],
+  ["Esc", "close palette · focus prompt"],
 ]
 
 /** Settings launcher: rows that open the matching overlay or toggle in place. */
@@ -548,6 +549,50 @@ export function PermissionOverlay(props: {
       </box>
       <text style={{ fg: colors().faint }} height={1}>
         y allow · a always · n deny · ←→ choose
+      </text>
+    </Frame>
+  )
+}
+
+/** Tail of ~/.local/state/gemma/server.log (the TUI owns the terminal). */
+export function LogsOverlay(props: {
+  client: GemmaClient
+  accent: ResolvedTheme
+  onClose: () => void
+}) {
+  const [text, setText] = createSignal("Loading…")
+  const [path, setPath] = createSignal("")
+  const [error, setError] = createSignal("")
+
+  useKeyboard((key) => {
+    if (key.name === "escape" || key.name === "return" || key.name === "kpenter" || key.name === "q") {
+      key.preventDefault()
+      props.onClose()
+    }
+  })
+
+  onMount(() => {
+    props.client
+      .logs()
+      .then((result) => {
+        setPath(result.path)
+        setText(result.text.trim() || "(log file is empty)")
+      })
+      .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : String(reason)))
+  })
+
+  return (
+    <Frame title="Server log (tail)" accent={props.accent} width={90} height={24}>
+      <text style={{ fg: colors().faint }} height={1} truncate>
+        {path()}
+      </text>
+      <scrollbox flexGrow={1} verticalScrollbarOptions={{ visible: true }}>
+        <text style={{ fg: error() ? colors().danger : colors().muted }} wrapMode="word">
+          {error() || text()}
+        </text>
+      </scrollbox>
+      <text style={{ fg: colors().faint }} height={1}>
+        Esc, Enter or q to close
       </text>
     </Frame>
   )

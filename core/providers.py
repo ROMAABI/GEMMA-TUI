@@ -13,7 +13,7 @@ import httpx
 
 from config.settings import Settings
 from core.client import LlamaClient
-from core.tools import parse_tool_calls
+from core.tools import parse_tool_calls, strip_tool_calls
 from utils import runlog
 
 
@@ -36,10 +36,10 @@ class ToolCall:
 
 @dataclass
 class ProviderEvent:
-    type: str  # text | reasoning | tool_calls | usage | done
+    type: str  # text | text_replace | reasoning | tool_calls | usage | done
     text: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
-    usage: dict[str, int] = field(default_factory=dict)
+    usage: dict[str, int | float] = field(default_factory=dict)
     finish_reason: str = ""
 
 
@@ -219,7 +219,7 @@ class NativeToolProvider:
         accumulated: dict[int, dict[str, str]] = {}
         text_buffer: list[str] = []
         finish_reason = ""
-        usage: dict[str, int] = {}
+        usage: dict[str, int | float] = {}
         self._last_timings: dict[str, Any] = {}
         started = time.monotonic()
 
@@ -314,12 +314,19 @@ class NativeToolProvider:
         tool_calls = self._finalize_calls(accumulated)
         if not tool_calls and text_buffer:
             # Some chat templates emit XML tool calls as text even on the native
-            # route. Recover them so the agent still makes progress.
-            parsed = parse_tool_calls("".join(text_buffer))
+            # route. Recover them so the agent still makes progress, and strip
+            # the markup from the prose so the UI doesn't render raw tool-call
+            # XML (with stray token fragments) as the assistant's answer.
+            raw_text = "".join(text_buffer)
+            parsed = parse_tool_calls(raw_text)
             tool_calls = [
                 ToolCall(id=f"call_{idx}", name=name, arguments=args)
                 for idx, (name, args) in enumerate(parsed)
             ]
+            if tool_calls:
+                preamble = strip_tool_calls(raw_text)
+                if preamble != raw_text.strip():
+                    yield ProviderEvent("text_replace", text=preamble)
         if usage:
             yield ProviderEvent("usage", usage=usage)
         if tool_calls:
@@ -327,25 +334,31 @@ class NativeToolProvider:
         yield ProviderEvent("done", finish_reason=finish_reason)
 
     @staticmethod
-    def _merge_usage(current: dict[str, int], incoming: dict[str, Any]) -> dict[str, int]:
+    def _merge_usage(current: dict[str, int | float], incoming: dict[str, Any]) -> dict[str, int | float]:
         merged = dict(current)
         mapping = {
             "prompt_tokens": "input_tokens",
             "completion_tokens": "output_tokens",
             "total_tokens": "total_tokens",
+            "gen_ms": "gen_ms",
         }
         for source, target in mapping.items():
-            if isinstance(incoming.get(source), int):
-                merged[target] = incoming[source]
+            value = incoming.get(source)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                merged[target] = value
         return merged
 
     @staticmethod
-    def _timings_to_usage(timings: dict[str, Any]) -> dict[str, int]:
-        usage: dict[str, int] = {}
+    def _timings_to_usage(timings: dict[str, Any]) -> dict[str, int | float]:
+        usage: dict[str, int | float] = {}
         if isinstance(timings.get("prompt_n"), int):
             usage["prompt_tokens"] = timings["prompt_n"]
         if isinstance(timings.get("predicted_n"), int):
             usage["completion_tokens"] = timings["predicted_n"]
+        if isinstance(timings.get("predicted_ms"), (int, float)):
+            # Real generation time (no prefill), so the UI can compute tok/s
+            # from the same source as the server's timing log.
+            usage["gen_ms"] = timings["predicted_ms"]
         return usage
 
     @staticmethod

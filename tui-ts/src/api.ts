@@ -237,6 +237,11 @@ export class GemmaClient {
     return this.json<ServerInfo>("/api/info")
   }
 
+  /** Tail of the server log, shown in the in-TUI /logs panel. */
+  logs(): Promise<{ path: string; text: string }> {
+    return this.json("/api/logs")
+  }
+
   /** Liveness probe (the header connection dot polls this). */
   health(): Promise<{ status: string; app: string }> {
     return this.json("/health")

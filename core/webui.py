@@ -32,6 +32,7 @@ from config.settings import Settings
 from core.agent_service import AgentRuntime
 from core.client import LlamaClient
 from sessions.store import SessionStore
+from utils.paths import server_log_path
 
 DEFAULT_PORT = 47317
 COOKIE_NAME = "gemma_web"
@@ -343,6 +344,8 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/info":
             self._json(self._info())
+        elif path == "/api/logs":
+            self._server_log()
         elif path == "/api/sessions":
             self._json({"sessions": self._sessions()})
         elif path == "/api/models":
@@ -455,6 +458,17 @@ class _Handler(BaseHTTPRequestHandler):
             self._json({"error": "not found"}, 404)
 
     # ── API ─────────────────────────────────────────────────────────────
+    def _server_log(self) -> None:
+        """Tail the server log for the in-TUI ``/logs`` panel."""
+        log_path = server_log_path()
+        lines: list[str] = []
+        try:
+            with log_path.open("r", encoding="utf-8", errors="replace") as handle:
+                lines = handle.readlines()[-200:]
+        except OSError:
+            pass
+        self._json({"path": str(log_path), "text": "".join(lines)})
+
     def _info(self) -> dict[str, Any]:
         settings = self.gemma.settings
         try:

@@ -45,6 +45,7 @@ export function Feed(props: { chat: Chat; accent: ColorInput; onCopy: (text: str
                 message={message}
                 accent={props.accent}
                 streaming={streamingId() === message.id}
+                showThinking={props.chat.showThinking()}
                 onCopy={props.onCopy}
               />
             )}

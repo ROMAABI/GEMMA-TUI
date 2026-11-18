@@ -22,7 +22,12 @@ MAX_LOG_OUTPUT = 20_000
 
 
 def log(event: dict) -> None:
-    """Append one record to the turn log; never raises."""
+    """Append one record to the turn log; never raises, never prints.
+
+    Everything in here is written to the JSONL file only: the TUI owns the
+    terminal, and a stray server log line would paint over it (the /logs
+    command reads this file instead).
+    """
     record = {"ts": round(time.time(), 3), **event}
     try:
         line = json.dumps(record, ensure_ascii=False, default=str)
@@ -34,7 +39,6 @@ def log(event: dict) -> None:
             handle.write(line + "\n")
     except OSError:
         pass
-    print(f"[gemma] {line}", flush=True)
 
 
 def output_for_log(output: str) -> dict:

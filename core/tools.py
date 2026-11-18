@@ -42,6 +42,11 @@ _TOOL_CALL_RE = re.compile(
 )
 
 
+def strip_tool_calls(text: str) -> str:
+    """Remove tool-call markup, leaving only the model's real prose."""
+    return _TOOL_CALL_RE.sub("", text).strip()
+
+
 class WorkspaceTools:
     """Backward-compatible sandboxed workspace tool facade."""
 

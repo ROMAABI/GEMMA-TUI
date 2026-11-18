@@ -13,6 +13,7 @@ export const TUI_COMMANDS: CommandDef[] = [
   { name: "/rename", description: "Rename this session" },
   { name: "/delete", description: "Delete this session" },
   { name: "/copy", description: "Copy the last reply" },
+  { name: "/logs", description: "View the server log tail (ctrl+x l)" },
   { name: "/stats", description: "Show session stats" },
   { name: "/sidebar", description: "Toggle or show/hide the sidebar (ctrl+b)" },
   { name: "/history", description: "List saved sessions" },

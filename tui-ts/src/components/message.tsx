@@ -1,4 +1,4 @@
-import { For, Match, Show, Switch, createMemo } from "solid-js"
+import { For, Match, Show, Switch, createMemo, createSignal } from "solid-js"
 import type { ColorInput } from "@opentui/core"
 import type { Message, Part } from "../chat"
 import { colors } from "../theme"
@@ -81,19 +81,33 @@ function ToolBlock(props: { part: Extract<Part, { kind: "tool" }>; accent: Color
   )
 }
 
-function ReasoningBlock(props: { text: string }) {
-  const preview = createMemo(() => {
-    const lines = props.text.trim().split("\n")
-    return lines.length > 6 ? `${lines.slice(0, 6).join("\n")}…` : lines.join("\n")
-  })
+function ReasoningBlock(props: { text: string; streaming: boolean; expandAll: boolean }) {
+  const [expanded, setExpanded] = createSignal(false)
+  const open = () => expanded() || props.expandAll
+  const charCount = createMemo(() => Array.from(props.text.trim()).length)
   return (
-    <box flexDirection="column" flexShrink={0} marginTop={1} border={["left"]} borderColor={colors().border} paddingLeft={1}>
-      <text style={{ fg: colors().faint }} height={1}>
-        <i>thinking</i>
+    <box
+      flexDirection="column"
+      flexShrink={0}
+      marginTop={1}
+      border={["left"]}
+      borderColor={colors().border}
+      paddingLeft={1}
+    >
+      <text
+        style={{ fg: colors().faint }}
+        height={1}
+        onMouseDown={() => setExpanded(!expanded())}
+      >
+        {open() ? "▾ thinking" : "▸ thinking…"}
+        {props.streaming ? " (working)" : ""}
+        {!props.streaming && charCount() > 0 ? ` · ${formatNumber(charCount())} chars · click or ^X v` : ""}
       </text>
-      <text style={{ fg: colors().muted }} wrapMode="word">
-        <i>{preview()}</i>
-      </text>
+      <Show when={open() && props.text.trim()}>
+        <text style={{ fg: colors().muted }} wrapMode="word">
+          <i>{props.text.trim()}</i>
+        </text>
+      </Show>
     </box>
   )
 }
@@ -147,6 +161,7 @@ export function MessageCard(props: {
   message: Message
   accent: ColorInput
   streaming: boolean
+  showThinking: boolean
   onCopy: (text: string) => void
 }) {
   const isUser = () => props.message.role === "user"
@@ -177,7 +192,11 @@ export function MessageCard(props: {
                     <ToolBlock part={part as Extract<Part, { kind: "tool" }>} accent={props.accent} />
                   </Match>
                   <Match when={part.kind === "reasoning"}>
-                    <ReasoningBlock text={part.kind === "reasoning" ? part.text : ""} />
+                    <ReasoningBlock
+                      text={part.kind === "reasoning" ? part.text : ""}
+                      streaming={props.streaming}
+                      expandAll={props.showThinking}
+                    />
                   </Match>
                   <Match when={part.kind === "text"}>
                     <box flexDirection="column" marginTop={1}>
@@ -210,15 +229,28 @@ export function MessageCard(props: {
 
             <box flexDirection="row" height={1} gap={1} marginTop={1}>
               <Show when={typeof props.message.elapsed === "number" && !props.streaming}>
-                <text style={{ fg: colors().faint }}>
-                  {`⚡ ${formatSeconds(props.message.elapsed ?? 0)}`}
-                  {` · ${formatNumber(
-                    Math.round(
-                      (props.message.tokens ?? props.message.content.length / 4) /
-                        Math.max((props.message.elapsed ?? 0) - (props.message.ttft ?? 0), 0.001),
-                    ),
-                  )} tok/s`}
-                </text>
+                {(() => {
+                  const genSeconds = (props.message.genMs ?? 0) / 1000
+                  const tokens = props.message.tokens ?? props.message.content.length / 4
+                  const rate = genSeconds > 0
+                    ? Math.round(tokens / genSeconds)
+                    : Math.round(tokens / Math.max((props.message.elapsed ?? 0) - (props.message.ttft ?? 0), 0.001))
+                  const toolMs = props.message.parts.reduce(
+                    (sum, part) =>
+                      part.kind === "tool" && part.finishedAt && part.startedAt
+                        ? sum + (part.finishedAt - part.startedAt)
+                        : sum,
+                    0,
+                  )
+  const toolTime = toolMs < 1000 ? `${Math.round(toolMs)}ms` : formatSeconds(toolMs / 1000)
+                  return (
+                    <text style={{ fg: colors().faint }}>
+                      {`⚡ ${formatSeconds(props.message.elapsed ?? 0)}`}
+                      {` · ${formatNumber(rate)} tok/s`}
+                      {toolMs > 0 ? ` · tools ${toolTime}` : ""}
+                    </text>
+                  )
+                })()}
               </Show>
               <box flexGrow={1} />
               <text style={{ fg: colors().faint }} onMouseDown={() => props.onCopy(props.message.content)}>
