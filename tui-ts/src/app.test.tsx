@@ -405,7 +405,7 @@ async function mount(mock: MockServer): Promise<{ setup: TestRendererSetup; chat
   await chat.loadProviders()
   await chat.loadCommands()
 
-  const setup = await testRender(() => <App chat={chat} />, { width: 110, height: 34 })
+  const setup = await testRender(() => <App chat={chat} />, { width: 130, height: 34 })
   await setup.renderOnce()
   return { setup, chat }
 }

@@ -1,7 +1,8 @@
-import { Show, createEffect, createMemo, createSignal, on, onCleanup } from "solid-js"
+import { Show, createEffect, createMemo, createSignal, on, onCleanup, untrack } from "solid-js"
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid"
 import type { Chat } from "./chat"
 import { mergeCommands } from "./commands"
+import { debugLog } from "./debuglog"
 import { displayModelName } from "./format"
 import { activeThemeMode, colors, isThemeMode, setTheme, setThemeMode, theme, THEMES } from "./theme"
 import { loadPrefs, savePrefs } from "./prefs"
@@ -67,12 +68,17 @@ export function App(props: { chat: Chat }) {
 
   // Narrow terminals drop the sidebar automatically; a manual ctrl+b choice
   // wins and survives later resizes.
+  // No manual choice at startup: the first resize/width read applies auto-hide.
   let manualSidebar = false
   createEffect(
     on(
-      () => dims().width,
-      (width) => {
+      () => [dims().width, dims().height] as const,
+      ([width]) => {
         if (!manualSidebar) setSidebar(width >= SIDEBAR_HIDE_BELOW)
+        debugLog(
+          `cols=${width} sidebar=${untrack(sidebar) ? "shown" : "hidden"}` +
+            (manualSidebar ? " manual" : ""),
+        )
       },
     ),
   )

@@ -2,7 +2,8 @@
  * Shared shell layout constants. Sidebar sizing has one source of truth so the
  * main area, composer and top bar stay in sync when the terminal is resized.
  */
-export const SIDEBAR_HIDE_BELOW = 72
+/** Hide the rail below this terminal width (≈60% of a 200-col screen). */
+export const SIDEBAR_HIDE_BELOW = 120
 
 export const LAYOUT = {
   sidebar: {

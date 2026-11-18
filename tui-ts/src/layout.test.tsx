@@ -1,6 +1,9 @@
 /** Layout constants and shell sizing at the supported terminal widths. */
 
 import { describe, expect, test } from "bun:test"
+import { mkdtempSync, readFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { testRender } from "@opentui/solid"
 import type { TestRendererSetup } from "@opentui/core/testing"
 import { App } from "./app"
@@ -10,7 +13,7 @@ import { truncate } from "./format"
 
 describe("sidebar layout", () => {
   test("hide threshold is a single layout constant", () => {
-    expect(SIDEBAR_HIDE_BELOW).toBe(72)
+    expect(SIDEBAR_HIDE_BELOW).toBe(120)
   })
 
   test("width follows the single breakpoint config", () => {
@@ -140,6 +143,43 @@ describe("sidebar layout", () => {
     await setup.renderOnce()
     expect(chat.activeId()).toBe("s1")
     expect(setup.captureCharFrame()).not.toContain("◆ gemma")
+  })
+
+  test("narrow composer uses the short placeholder on one line", async () => {
+    const chat = createChat({ health: async () => ({ status: "ok", app: "gemma" }) } as never)
+    const setup = await testRender(() => <App chat={chat} />, { width: 70, height: 24 })
+    setups.push(setup)
+    await setup.renderOnce()
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("Ask anything…")
+    expect(frame).not.toContain("(/ for commands)")
+    expect(frame.split("\n").some((line) => line.includes("⌄") && line.includes("➤"))).toBe(true)
+    expect(frame).toContain("Where should we start?")
+  })
+
+  test("resize log tracks live columns across the 120-col threshold", async () => {
+    const logPath = join(mkdtempSync(join(tmpdir(), "gemma-layout-")), "tui-debug.log")
+    const previous = process.env.GEMMA_TUI_DEBUG_LOG
+    process.env.GEMMA_TUI_DEBUG_LOG = logPath
+    try {
+      const chat = createChat({ health: async () => ({ status: "ok", app: "gemma" }) } as never)
+      const setup = await testRender(() => <App chat={chat} />, { width: 200, height: 40 })
+      setups.push(setup)
+      await setup.renderOnce()
+      for (const width of [119, 90, 70, 120]) {
+        setup.resize(width, 30)
+        await setup.renderOnce()
+      }
+      const lines = readFileSync(logPath, "utf8").split("\n").filter((line) => line.includes("cols="))
+      for (const [cols, state] of [
+        [200, "shown"], [119, "hidden"], [90, "hidden"], [70, "hidden"], [120, "shown"],
+      ] as Array<[number, string]>) {
+        expect(lines.some((line) => line.includes(`cols=${cols} sidebar=${state}`))).toBe(true)
+      }
+    } finally {
+      if (previous === undefined) delete process.env.GEMMA_TUI_DEBUG_LOG
+      else process.env.GEMMA_TUI_DEBUG_LOG = previous
+    }
   })
 
   test("disposes renderers", async () => {

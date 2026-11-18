@@ -1,4 +1,5 @@
 import { For, Show, createEffect, createMemo, createSignal, on } from "solid-js"
+import { useTerminalDimensions } from "@opentui/solid"
 import type { KeyEvent, TextareaRenderable } from "@opentui/core"
 import type { CommandDef } from "../api"
 import { colors, type ResolvedTheme } from "../theme"
@@ -44,6 +45,9 @@ export function Composer(props: {
   const [selected, setSelected] = createSignal(0)
   const [dismissed, setDismissed] = createSignal(false)
   let area: TextareaRenderable | undefined
+  const dims = useTerminalDimensions()
+  const placeholder = () =>
+    dims().width < 70 ? "Ask anything…" : "Ask anything… (/ for commands)"
 
   const commands = createMemo(() => (props.commands.length ? props.commands : FALLBACK_COMMANDS))
 
@@ -226,6 +230,7 @@ export function Composer(props: {
           ref={area}
           focused
           flexGrow={1}
+          flexShrink={1}
           minWidth={8}
           minHeight={1}
           maxHeight={5}
@@ -233,7 +238,7 @@ export function Composer(props: {
           focusedBackgroundColor={colors().card}
           textColor={colors().text}
           focusedTextColor={colors().text}
-          placeholder="Ask anything… (/ for commands)"
+          placeholder={placeholder()}
           placeholderColor={colors().muted}
           keyBindings={[
             { name: "return", action: "submit" },
@@ -245,7 +250,7 @@ export function Composer(props: {
           onContentChange={handleContentChange}
           onKeyDown={onKeyDown}
         />
-        <text flexShrink={1} truncate marginRight={1} onMouseDown={props.onModel}>
+        <text flexShrink={1} truncate height={1} minWidth={0} marginRight={1} onMouseDown={props.onModel}>
           <span style={{ fg: colors().text }}>
             {truncate(displayModelName(props.model) || "no model", modelBudget())}
           </span>
@@ -255,6 +260,7 @@ export function Composer(props: {
           bg={props.streaming ? colors().danger : props.accent.accent}
           style={{ fg: colors().page }}
           flexShrink={0}
+          height={1}
           onMouseDown={() => (props.streaming ? props.onStop() : submit())}
         >
           <b>{props.streaming ? " ■ " : " ➤ "}</b>
