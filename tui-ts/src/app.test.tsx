@@ -776,6 +776,10 @@ describe("OpenTUI client", () => {
     // "who is the cm of tamil nadu" searches and shows its sources.
     setup.mockInput.typeText("who is the cm of tamil nadu")
     setup.mockInput.pressEnter()
+    // The wider rail changes line wrapping, so let the reply settle before
+    // waiting for a frame that includes all three turns.
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    await setup.renderOnce()
     await setup.waitForFrame((text: string) => text.includes("Hello from the mock") && text.includes("cm of tamil nadu") && text.split("⚡").length > 3)
     expect(current.prepareCalls[1]).toBe("who is the cm of tamil nadu")
     expect(current.chatRequests.at(-1)?.context).toBe("OFFICE CONTEXT")
@@ -783,8 +787,10 @@ describe("OpenTUI client", () => {
     expect(last?.search?.status).toBe("ok")
     expect(last?.search?.sources?.[0]?.domain).toBe("en.wikipedia.org")
     expect(last?.search?.sources?.[0]?.date).toBe("2025-11-10")
+    // The attribution may wrap at narrower main-area widths.
     const frame = await setup.waitForFrame((text: string) =>
-      text.includes("List of chief ministers of Tamil Nadu — en.wikipedia.org · 2025-11-10"),
+      text.includes("List of chief ministers of Tamil Nadu — en.wikipedia.org") &&
+      text.includes("2025-11-"),
     )
     expect(frame).toContain("sources · 1")
   })

@@ -3,11 +3,9 @@ import { useTerminalDimensions } from "@opentui/solid"
 import type { Session } from "../chat"
 import { colors, theme, tint, type ResolvedTheme } from "../theme"
 import { relativeTime, truncate, username } from "../format"
+import { LAYOUT, SIDEBAR_WIDTH, sessionTitleWidth } from "../layout"
 
-export const SIDEBAR_WIDTH = 28
-
-/**
- * Gemini-style left rail: brand + search, navigation, the session list and a
+/** Gemini-style left rail: brand + search, navigation, the session list and a
  * user footer. The rail is always a step darker than the page behind it.
  */
 export function Sidebar(props: {
@@ -20,7 +18,11 @@ export function Sidebar(props: {
   onSettings: () => void
 }) {
   const dims = useTerminalDimensions()
-  const listHeight = createMemo(() => Math.max(3, dims().height - 13))
+  const width = () => SIDEBAR_WIDTH(dims().width)
+  const titleBudget = createMemo(() => sessionTitleWidth(dims().width))
+  const listHeight = createMemo(() =>
+    Math.max(LAYOUT.sidebar.minListRows, dims().height - LAYOUT.sidebar.chromeRows),
+  )
   const rail = () => {
     const page = colors().page
     // System themes may hand us an RGBA object; only hex strings can be tinted.
@@ -30,7 +32,7 @@ export function Sidebar(props: {
 
   return (
     <box
-      width={SIDEBAR_WIDTH}
+      width={width()}
       flexShrink={0}
       flexDirection="column"
       backgroundColor={rail()}
@@ -94,7 +96,7 @@ export function Sidebar(props: {
                     flexGrow={1}
                     truncate
                   >
-                    {truncate(session.title || "New chat", SIDEBAR_WIDTH - 10)}
+                    {truncate(session.title || "New chat", titleBudget())}
                   </text>
                   <text style={{ fg: colors().faint }}>{relativeTime(session.updatedAt)}</text>
                 </box>

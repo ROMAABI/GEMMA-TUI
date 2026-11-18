@@ -6,7 +6,8 @@ import { displayModelName } from "./format"
 import { activeThemeMode, colors, isThemeMode, setTheme, setThemeMode, theme, THEMES } from "./theme"
 import { loadPrefs, savePrefs } from "./prefs"
 import { Feed } from "./components/feed"
-import { Sidebar, SIDEBAR_WIDTH } from "./components/sidebar"
+import { Sidebar } from "./components/sidebar"
+import { LAYOUT, SIDEBAR_WIDTH } from "./layout"
 import { Header } from "./components/topbar"
 import { Landing } from "./components/landing"
 import { Composer, type Inject } from "./components/composer"
@@ -71,7 +72,7 @@ export function App(props: { chat: Chat }) {
     on(
       () => dims().width,
       (width) => {
-        const below = width < 92
+        const below = width < LAYOUT.sidebar.autoHideBelow
         if (below !== wasBelow) {
           wasBelow = below
           manualSidebar = false
@@ -706,7 +707,7 @@ export function App(props: { chat: Chat }) {
   }
 
   const contentWidth = () =>
-    Math.max(20, dims().width - (sidebar() ? SIDEBAR_WIDTH + 1 : 0))
+    Math.max(20, dims().width - (sidebar() ? SIDEBAR_WIDTH(dims().width) + LAYOUT.sidebar.gutter : 0))
 
   /** Gemini-style pill: 70% of the main area, clamped to a sane range. */
   const pillWidth = () => {
