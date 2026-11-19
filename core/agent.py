@@ -23,6 +23,13 @@ from core.tooling.types import ToolSpec
 from core.tools import WorkspaceTools, build_agent_system_prompt
 from utils import runlog
 
+# A search answer that ends with finish_reason=length gets one continuation
+# with a generous-enough budget instead of a mid-sentence reply.
+SEARCH_ANSWER_MAX_TOKENS = 400
+# Tool observations kept in model context (~4 chars/token); the UI still gets
+# the full output, collapsed to 15 lines.
+CONTEXT_TOOL_OUTPUT_TOKENS = 1500
+
 
 @dataclass
 class AgentEvent:
@@ -288,10 +295,43 @@ class AgentOrchestrator:
                         **event.usage,
                         "output_tokens": state["gen_tokens_total"],
                         "gen_ms": round(state["gen_ms_total"], 1),
+                        # Real prompt_n from llama.cpp for this step, including
+                        # tool outputs; the UI shows this as ctx usage.
+                        "prompt_tokens": state["usage"].get("input_tokens", 0),
                     },
                 )
             elif event.type == "done":
                 state["finish_reason"] = event.finish_reason
+                yield AgentEvent("done", event.finish_reason)
+
+    async def _continue_answer(
+        self,
+        conversation: list[dict[str, Any]],
+        partial: str,
+    ) -> str:
+        """One extra no-tools call when the model hit the token limit."""
+        parts: list[str] = []
+        try:
+            async for event in self.provider.stream(
+                [*conversation, {"role": "assistant", "content": partial}],
+                [],
+                temperature=getattr(self.settings, "temperature", 0.7),
+                max_tokens=SEARCH_ANSWER_MAX_TOKENS,
+            ):
+                if event.type == "text":
+                    parts.append(event.text)
+        except Exception:  # noqa: BLE001 - never fail the turn over a continuation
+            pass
+        continuation = "".join(parts).strip()
+        runlog.log(
+            {
+                "type": "continuation",
+                "reason": "finish_reason=length",
+                "partial_chars": len(partial),
+                "continued_chars": len(continuation),
+            }
+        )
+        return continuation
 
     # ── Prompt cache warmup ─────────────────────────────────────────────
 
@@ -413,15 +453,20 @@ class AgentOrchestrator:
                     if overflow_retry or self.compactor is None:
                         yield AgentEvent(
                             "error",
-                            "Context is too large and could not be compacted. "
-                            "Start a new session or raise the context limit.",
+                            "Context overflow: the conversation is too large for the "
+                            "server's window and could not be compacted. Run /compact "
+                            "or start a new chat to continue.",
                         )
                         log_turn("context_overflow")
                         return
                     overflow_retry = True
                     result = await self.compactor.compact(conversation, reason="overflow")
                     if result is None:
-                        yield AgentEvent("error", "Context overflow: nothing left to compact.")
+                        yield AgentEvent(
+                            "error",
+                            "Context overflow: there were no older turns left to compact. "
+                            "Run /compact or start a new chat to continue.",
+                        )
                         return
                     conversation = result.messages
                     self._persist_checkpoint(result.summary, "overflow")
@@ -462,6 +507,16 @@ class AgentOrchestrator:
             # whole turn, not just the last provider call.
             turn_gen_tokens = state["gen_tokens_total"]
             turn_gen_ms = state["gen_ms_total"]
+
+            if state["finish_reason"] == "length" and not state["tool_calls"] and not state.get("continued"):
+                partial = "".join(state["text"]).strip()
+                if partial:
+                    state["continued"] = True
+                    continuation = await self._continue_answer(conversation, partial)
+                    if continuation:
+                        state["text"].append(continuation)
+                        yield AgentEvent("text", continuation)
+                        state["finish_reason"] = "stop"
 
             text = "".join(state["text"])
             reasoning = "".join(state["reasoning"])
@@ -629,19 +684,26 @@ class AgentOrchestrator:
                             "step": step,
                         }
                 ordered.append((call, result))
+                context_output = result.output[: CONTEXT_TOOL_OUTPUT_TOKENS * 4]
+                if len(context_output) < len(result.output):
+                    context_output += "\n... [tool output truncated for context; full output is in the UI]"
                 tool_message = {
                     "role": "tool",
                     "tool_call_id": call.id,
                     "name": call.name,
-                    "content": result.output,
+                    "content": context_output,
                 }
                 conversation.append(tool_message)
                 self._persist_message(
                     "tool",
-                    result.output,
+                    context_output,
                     tool_call_id=call.id,
                     name=call.name,
-                    metadata={"ok": result.ok, "tool_name": call.name},
+                    metadata={
+                        "ok": result.ok, "tool_name": call.name,
+                        "context_chars": len(context_output),
+                        "full_chars": len(result.output),
+                    },
                 )
                 yield AgentEvent("tool_message", tool_message)
 

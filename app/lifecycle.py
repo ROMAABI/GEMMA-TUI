@@ -49,6 +49,21 @@ def get_loaded_model(base_url: str) -> str | None:
     return None
 
 
+def get_server_context_limit(base_url: str, fallback: int = 32_768) -> int:
+    """Read the real n_ctx from llama.cpp /props (the UI used to assume 32768)."""
+    try:
+        response = httpx.get(f"{base_url.rstrip('/')}/props", timeout=2.0)
+        response.raise_for_status()
+        data = response.json()
+        settings = data.get("default_generation_settings", {})
+        for candidate in (settings.get("n_ctx"), settings.get("params", {}).get("n_ctx")):
+            if isinstance(candidate, int) and candidate > 0:
+                return candidate
+    except Exception:  # noqa: BLE001 - offline servers keep the configured limit
+        pass
+    return fallback
+
+
 async def async_get_loaded_model(base_url: str) -> str | None:
     """Asynchronously query llama.cpp server for the active loaded model name."""
     try:

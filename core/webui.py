@@ -123,6 +123,14 @@ class GemmaWebServer:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self.agent = AgentRuntime(settings, self.store)
+        from app.lifecycle import get_server_context_limit
+
+        # The llama server's real n_ctx may be far below settings.context_limit;
+        # use it everywhere (UI, compactor) so "ctx" numbers match reality.
+        self.context_limit = get_server_context_limit(
+            settings.base_url, settings.context_limit
+        )
+        settings.context_limit = self.context_limit
         self._chat_inflight = 0
         self._inflight_lock = threading.Lock()
         from core.titles import TitleManager
@@ -510,7 +518,7 @@ class _Handler(BaseHTTPRequestHandler):
             "base_url": settings.base_url,
             "permission_mode": getattr(settings, "permission_mode", "auto"),
             "temperature": settings.temperature,
-            "context_max": settings.context_limit,
+            "context_max": self.gemma.context_limit,
             "max_steps": getattr(settings, "agent_max_steps", 10),
             "dist": self.gemma.dist.is_dir(),
         }

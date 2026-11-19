@@ -56,7 +56,7 @@ _ENTITY_STOPWORDS = set(
     inr rs amazon flipkart gsmarena 91mobiles smartprix today tonight now week
     month year specs specification review reviews features launch released
     release country region and than then next about news breaking story
-    options option locations location buying stores store online""".split()
+    options option locations location buying stores store online user assistant""".split()
 )
 _MONTHS = set(
     """january february march april may june july august september october
@@ -130,7 +130,9 @@ def _rewrite_prompt(message: str, history: list[str], region: str, intent: str) 
         "explanation, no quotes, no question mark. Use Title Case keywords, at "
         "most 8 words: the product/person, the attribute, the region, and month "
         "year for time-sensitive questions. No filler like 'buy from' or "
-        "'buying options'. "
+        "'buying options'. If the message says 'this', 'it', 'that', 'same' or "
+        "names no product/person, take the entity from the most recent user "
+        "line in Recent chat (for example 'Poco X7 Pro'). "
         f"The user is in {region}. Today is {today}. {extra}<end_of_turn>\n"
         f"<start_of_turn>user\nRecent chat:\n{context}\n"
         f"Message: {message}<end_of_turn>\n"
@@ -139,7 +141,11 @@ def _rewrite_prompt(message: str, history: list[str], region: str, intent: str) 
 
 
 def _rule_query(message: str, history: list[str], region: str, intent: str) -> str:
-    entity = query_entity(message) or (query_entity(history[-1]) if history else "")
+    entity = query_entity(message)
+    history_entity = query_entity(history[-1]) if history else ""
+    generic = bool(re.search(r"\b(this|it|that|same|there)\b", message, re.IGNORECASE))
+    if history_entity and (generic or not any(re.search(r"\d", token) for token in entity.split())):
+        entity = history_entity
     words = entity.split() or [w for w in re.findall(r"\w+", message.lower()) if w not in _ENTITY_STOPWORDS][:4]
     query = " ".join(words).title()
     if intent == "shopping":

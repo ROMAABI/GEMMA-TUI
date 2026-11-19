@@ -319,11 +319,9 @@ def edit_file(context: ToolContext, args: dict[str, Any]) -> ToolResult:
 
 def list_dir(context: ToolContext, args: dict[str, Any]) -> ToolResult:
     raw_path = args.get("path") or "."
-    depth = args.get("max_depth", args.get("depth", 2))
-    try:
-        depth = max(1, min(int(depth or 2), 6))
-    except (TypeError, ValueError):
-        depth = 2
+    # Non-recursive, small listing: never walk the home directory tree.
+    depth = 1
+    max_entries = 50
 
     try:
         target = context.resolve(raw_path, must_exist=True)
@@ -346,13 +344,13 @@ def list_dir(context: ToolContext, args: dict[str, Any]) -> ToolResult:
         for filename in sorted(files):
             if not filename.startswith("."):
                 items.append(f"{prefix}{filename}")
-        if len(items) > MAX_GLOB_RESULTS:
+        if len(items) >= max_entries:
             items.append("... [truncated]")
             break
 
     if not items:
         return ToolResult.success(f"Directory '{raw_path}' is empty.", path=raw_path, count=0)
-    return ToolResult.success("\n".join(items[:MAX_GLOB_RESULTS]), path=raw_path, count=len(items))
+    return ToolResult.success("\n".join(items[:max_entries]), path=raw_path, count=len(items))
 
 
 def glob_files(context: ToolContext, args: dict[str, Any]) -> ToolResult:
@@ -545,11 +543,10 @@ def filesystem_tools() -> list[ToolSpec]:
         ),
         ToolSpec(
             name="list_dir",
-            description="List files and directories in the workspace up to a shallow depth.",
+            description="List up to 50 entries of a workspace directory (non-recursive).",
             parameters=object_schema(
                 {
                     "path": string_prop("Workspace-relative directory (default '.')"),
-                    "max_depth": integer_prop("Maximum depth (1-6, default 2)", minimum=1, maximum=6),
                 }
             ),
             handler=list_dir,

@@ -140,6 +140,15 @@ def _sanitize_recent(recent: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return recent
 
 
+def _drop_old_tool_outputs(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Old tool observations are the cheapest context to reclaim first."""
+    dropped = "[old tool output omitted to save context; full output is in the chat]"
+    return [
+        {**message, "content": dropped} if message.get("role") == "tool" else message
+        for message in messages
+    ]
+
+
 class Compactor:
     def __init__(
         self,
@@ -197,6 +206,9 @@ class Compactor:
         system, older, recent = self._split(messages)
         if not older:
             return None
+
+        # Reclaim old tool payloads before asking the model to summarize turns.
+        older = _drop_old_tool_outputs(older)
 
         before_tokens = estimate_tokens(messages)
         transcript = _render_transcript(older)

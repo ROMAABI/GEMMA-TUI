@@ -88,6 +88,7 @@ def default_rules(mode: str = "auto") -> list[PermissionRule]:
         PermissionRule("edit", "*", "allow"),
         PermissionRule("bash", "*", "allow"),
         PermissionRule("webfetch", "*", "allow"),
+        PermissionRule("web_search", "*", "allow"),
         PermissionRule("mcp", "*", "allow"),
     ]
     normalized = (mode or "auto").lower()
@@ -97,6 +98,7 @@ def default_rules(mode: str = "auto") -> list[PermissionRule]:
                 PermissionRule("edit", "*", "deny"),
                 PermissionRule("bash", "*", "deny"),
                 PermissionRule("webfetch", "*", "deny"),
+                PermissionRule("web_search", "*", "deny"),
                 PermissionRule("mcp", "*", "deny"),
             ]
         )
@@ -106,6 +108,7 @@ def default_rules(mode: str = "auto") -> list[PermissionRule]:
                 PermissionRule("edit", "*", "ask"),
                 PermissionRule("bash", "*", "ask"),
                 PermissionRule("webfetch", "*", "ask"),
+                PermissionRule("web_search", "*", "ask"),
             ]
         )
     else:  # auto
