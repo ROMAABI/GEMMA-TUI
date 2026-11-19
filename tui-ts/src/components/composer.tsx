@@ -2,7 +2,7 @@ import { For, Show, createEffect, createMemo, createSignal, on } from "solid-js"
 import { useTerminalDimensions } from "@opentui/solid"
 import type { KeyEvent, TextareaRenderable } from "@opentui/core"
 import type { AttachmentDescriptor, CommandDef } from "../api"
-import { attachmentIcon, attachmentLabel, extractPaths } from "../attachments"
+import { attachmentIcon, attachmentLabel, extractPaths, isDirectoryPath } from "../attachments"
 import { colors, type ResolvedTheme } from "../theme"
 import { displayModelName, truncate } from "../format"
 
@@ -140,6 +140,10 @@ export function Composer(props: {
     const paths = extractPaths(text)
     const targets = paths.length ? paths : [text.trim()].filter(Boolean)
     if (!targets.length) return false
+    if (targets.length === 1 && (targets[0]!.endsWith("/") || isDirectoryPath(targets[0]!))) {
+      setText(`/attach ${targets[0]}`)
+      return true
+    }
     for (const path of targets) props.onAttach(path)
     setText("")
     setDismissed(false)

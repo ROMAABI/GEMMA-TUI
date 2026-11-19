@@ -1,6 +1,6 @@
 /** Attachment helpers shared by the composer, picker and transcript. */
 
-import { existsSync } from "node:fs"
+import { existsSync, statSync } from "node:fs"
 import { basename } from "node:path"
 import type { AttachmentDescriptor } from "./api"
 
@@ -25,6 +25,14 @@ export function extractPaths(text: string): string[] {
     }
   }
   return [...new Set(candidates)]
+}
+
+export function isDirectoryPath(path: string): boolean {
+  try {
+    return existsSync(path) && statSync(path).isDirectory()
+  } catch {
+    return false
+  }
 }
 
 export function formatBytes(bytes = 0): string {
