@@ -62,14 +62,16 @@ Switch anytime: `/theme cyberpunk`
 
 - **💬 Chat mode** — token streaming, `⚡ Xs` timing badge, rich markdown, `❐ Copy` / `Ctrl+Y`
 - **🤖 Agent mode** — multi-turn ReAct loop, auto intent-detect (`create a script`, `run pytest`…) or `/mode agent`
-  - Tools: `read_file` · `write_file` · `edit_file` · `list_dir` · `grep_search` · `run_command`
+  - Tools: `read_file` · `write_file` · `edit_file` · `list_dir` (50 entries, non-recursive) · `grep_search` · `run_command` · `web_search` · `webfetch`
   - Sandboxed to `workspace_dir` (default `.`), path-escape blocked
-- **🔍 Web Search RAG** — local SearXNG → public SearXNG fallback → Wikipedia + DuckDuckGo → Jina Reader deep-read → cited answer
+- **🖼 Attachments** — images/videos/PDF/text/code via `/attach`, `Ctrl+O` picker, drag-style paste, or `Ctrl+V` clipboard image; multimodal via llama.cpp `--mmproj`
+- **🔍 Web Search RAG** — query rewrite from chat history, intent routing, entity relevance gate, local SearXNG → public fallback → DuckDuckGo, retailer pages for availability, Jina Reader / direct fetch deep-read → grounded answer with sources
+- **🛑 Cancellation** — `Ctrl+C`, `/stop`, or `Ctrl+X s` cancels the active turn; queued messages continue
 - **🎨 7 themes** — `tokyo-night` (default), `dracula`, `deep-purple`, `nord`, `cyberpunk`, `emerald`, `system` (transparent)
 - **🧠 Model registry** — auto-discovers `models/*.gguf`, auto-detects loaded model from `/v1/models`, switch live
 - **🌐 Web UI** — the same server serves a browser app: `/web` or `Ctrl+W` prints a one-time pairing link; chats are shared with the TUI
-- **📁 Sessions** — SQLite, auto-titles, search, rename/delete, resume via `--session`
-- **⌨️ Power UX** — `/` autocomplete, `Ctrl+P` palette, `Ctrl+B` sidebar, `Ctrl+N/L/Y/C/D`
+- **📁 Sessions** — SQLite, auto-titles, search, rename/delete, fresh `New chat` on launch, `--continue` to resume, message queue
+- **⌨️ Power UX** — `/` autocomplete, `Ctrl+P` palette, responsive `Ctrl+B` sidebar, `Ctrl+N/L/Y/C/D`, Pac-Man live agent status
 
 ---
 
@@ -81,13 +83,18 @@ git clone https://github.com/ROMAABI/GEMMA-TUI.git
 cd GEMMA-TUI
 pip install -e .
 
-# 2. Get a model (~2.5 GB)
+# 2. Get a model (~2.5 GB) — the default config expects this one
 mkdir -p models
-wget -O models/gemma-3-4b-it-Q4_K_M.gguf \
-  https://huggingface.co/bartowski/gemma-3-4b-it-Q4_K_M.gguf
+wget -O models/gemma-4-E4B-it-ultra-uncensored-heretic-Q4_K_M.gguf \
+  https://huggingface.co/llmfan46/gemma-4-E4B-it-ultra-uncensored-heretic-GGUF/resolve/main/gemma-4-E4B-it-ultra-uncensored-heretic-Q4_K_M.gguf
 
-# 3. Start llama.cpp server
-llama-server -m models/gemma-3-4b-it-Q4_K_M.gguf --port 8080
+# Optional: vision projector for image/video attachments
+wget -O models/gemma-4-E4B-it-mmproj-BF16.gguf \
+  https://huggingface.co/llmfan46/gemma-4-E4B-it-ultra-uncensored-heretic-GGUF/resolve/main/gemma-4-E4B-it-mmproj-BF16.gguf
+
+# 3. Start llama.cpp server (add --mmproj for attachments)
+llama-server -m models/gemma-4-E4B-it-ultra-uncensored-heretic-Q4_K_M.gguf \
+  --mmproj models/gemma-4-E4B-it-mmproj-BF16.gguf --port 8080 --ctx-size 8192
 
 # 4. Launch (new terminal)
 gemma-local
@@ -182,7 +189,8 @@ Script does: detect `docker`/`podman` → generate `searxng/settings.yml` (secre
 gemma-local                  # OpenTUI client (default)
 gemma-local --classic        # Textual TUI (alternative front end)
 python main.py               # same, without install
-gemma-local -s <session_id>  # resume session
+gemma-local -s <session_id>  # open a specific session
+gemma-local --continue       # open the last session (default: fresh New chat)
 gemma-local -m <model_name>  # start with specific model
 ```
 
@@ -225,7 +233,11 @@ server has loaded, and stops when the TUI exits.
 | `gemma-local sessions` | List saved sessions (`id  title  updated_at`) |
 | `gemma-local config` | Print resolved config as JSON |
 
-Flags: `--session/-s <id>`, `--model/-m <name>`, `--classic`.
+Flags: `--session/-s <id>`, `--continue/-c`, `--model/-m <name>`, `--classic`.
+
+Every launch opens an empty `New chat` (landing screen); old sessions stay in
+the sidebar. Use `--continue` to reopen the last conversation. `Ctrl+N` starts
+another empty chat without creating a DB row until the first message is sent.
 
 ### In-app slash commands
 
@@ -241,6 +253,9 @@ Flags: `--session/-s <id>`, `--model/-m <name>`, `--classic`.
 | `/sidebar [show\|hide\|toggle]` | sidebar nav |
 | `/copy` | copy last reply |
 | `/clear` · `/new` · `/delete` · `/history` | manage view / sessions |
+| `/attach [path]` | attach an image/video/PDF/text file (no arg opens picker) |
+| `/stop` | cancel the running agent turn |
+| `/logs` | tail `~/.local/state/gemma/server.log` in a panel |
 | `/rename <name>` · `/stats` · `/config` | rename / token stats / dump config |
 | `/exit` | quit |
 
@@ -252,24 +267,28 @@ Type `/` for autocomplete, or `Ctrl+P` for palette.
 |---|---|
 | `Enter` | Send |
 | `Shift+Enter` | Newline |
-| `Tab` | Switch chat / agent mode (completes commands while the palette is open) |
+| `Tab` | Switch chat / agent mode (completes commands or `/attach` paths while the palette/path list is open) |
 | `Ctrl+X` then `n` | New session |
-| `Ctrl+X` then `l` | Toggle the session rail |
+| `Ctrl+X` then `s` | Stop the active turn |
+| `Ctrl+X` then `l` | Server log panel |
 | `Ctrl+X` then `m` | Model picker |
 | `Ctrl+X` then `t` | Theme picker |
 | `Ctrl+X` then `a` | Switch chat / agent mode |
 | `Ctrl+X` then `b` | Toggle sidebar |
 | `Ctrl+X` then `h` | Commands & keys |
 | `Ctrl+X` then `q` | Quit |
+| `Ctrl+O` | File picker / attach |
+| `Ctrl+V` | Attach image from clipboard (`wl-paste` / `xclip`) |
+| `Ctrl+U` | Clear the message queue |
 | `Ctrl+P` | Command palette (`/`) |
-| `Ctrl+B` | Toggle sidebar |
+| `Ctrl+B` | Toggle sidebar (hidden below 120 cols; overlay when manually opened narrow) |
 | `Ctrl+N` | New session |
 | `Ctrl+L` | Clear session |
 | `Ctrl+T` | Theme picker |
 | `Ctrl+K` | Pick a provider model |
 | `Ctrl+Y` | Copy last reply (OSC 52) |
 | `Ctrl+W` | Pair a browser |
-| `Ctrl+C` | Stop streaming |
+| `Ctrl+C` | Cancel the running turn (never exits the TUI) |
 | `Ctrl+D` / `Ctrl+Q` | Quit |
 | `F1` | Commands & keys |
 
@@ -318,6 +337,43 @@ models by provider; `Ctrl+K` or `/model` opens it.
 
 ---
 
+## 🖼 Attachments & multimodal input
+
+Attach files with `/attach <path>` (Tab completes paths), `Ctrl+O` (file picker),
+or by pasting one or more file paths into the composer (quoted, escaped, or
+`file://` URIs). `Ctrl+V` attaches an image from the clipboard (`wl-paste` on
+Wayland, `xclip` on X11). Up to 8 files, 20 MB each; chips appear above the input
+and Backspace on an empty prompt removes the last chip.
+
+| Type | Handling |
+|---|---|
+| Images (`png/jpg/webp/gif`) | Resized to ≤1024 px, sent as OpenAI `image_url` data URIs. Needs llama.cpp started with `--mmproj`. |
+| Video (`mp4/mov/webm/…`) | `ffmpeg` samples up to 8 frames (768 px, ~1/s, evenly spaced for longer clips) and sends them in order with a note like “These are 8 frames sampled from a video of duration 10.0 seconds”. Audio is skipped for now. If `ffmpeg` is missing: `sudo pacman -S ffmpeg`. |
+| PDF | `pdftotext` extracts text (`sudo pacman -S poppler` if missing). |
+| Text/code | Quoted context block with filename, capped at ~6000 tokens. |
+
+Stored copies live in `~/.local/share/gemma/attachments/<session_id>/` and the
+DB keeps the references, so reopening a session restores the chips. Image data
+is only re-sent for the last two turns; older attachments become `[image: name]`
+markers to save context. The status bar uses the server's real `prompt_n`
+(including cached prompt tokens) so image tokens count toward `ctx`.
+
+In the transcript, the user message shows name/size/type chips. Inline previews
+use the kitty graphics protocol when available, then colorless `chafa` art, then
+a text-only chip. Nothing is drawn that can shift the composer layout.
+
+Requires vision-enabled llama.cpp:
+
+```bash
+llama-server -m models/gemma-4-E4B-it-ultra-uncensored-heretic-Q4_K_M.gguf \
+  --mmproj models/gemma-4-E4B-it-mmproj-BF16.gguf --port 8080 --ctx-size 8192
+```
+
+Without `--mmproj`, attaching an image/video returns a clear error instead of
+silently dropping it. Works in chat and agent mode, with web search on or off.
+
+---
+
 ## 🤖 Coding Agent Mode — with examples
 
 Trigger: `/mode agent`, `/agent on`, or just ask something code-ish.
@@ -329,9 +385,11 @@ Trigger: `/mode agent`, `/agent on`, or just ask something code-ish.
 | `read_file` | `(path, start_line?, end_line?)` — line-numbered view |
 | `write_file` | `(path, content)` — create/overwrite, makes parent dirs |
 | `edit_file` | `(path, old_str, new_str)` — exact match, rejects ambiguous |
-| `list_dir` | `(path=".", max_depth=2)` |
+| `list_dir` | `(path=".")` — max 50 entries, non-recursive |
 | `grep_search` | `(query, path=".")` — `rg` if present, Python fallback |
 | `run_command` | `(command, timeout=30)` — bash in workspace, stdout/stderr capped |
+| `web_search` | `(query, top_n?)` — current facts, prices, availability, news; retailer domains preferred |
+| `webfetch` | `(url, format?)` — fetch an HTTP(S) page as readable text; content is untrusted data |
 
 **Try:**
 
@@ -358,12 +416,15 @@ Safety: paths are resolved against workspace root — `../../etc` escapes are re
 
 Flow (`core/orchestrator.py` + `core/research.py`):
 
-1. `decide_search` — regex heuristics (latest/current/price/election/…) + LLM judge (`YES/NO` + <8-word query). Office questions rewritten to `List of <office> of <place>` for Wikipedia hits.
-2. Query local SearXNG `:8888` → public nodes → Wikipedia + DDG fallback.
-3. Deep-read top 2 non-Wiki URLs via Jina Reader (`r.jina.ai`), Wiki hits get lead-paragraph extract.
-4. `format_context` injects snippets + `Source:` URLs; model answers with citations, never mentions internals.
+1. `decide_search` — regex heuristics (latest/current/price/buy/availability/“do you know”) + LLM judge. Follow-ups are rewritten into standalone keyword queries using chat history; the final query is logged.
+2. Local SearXNG `:8888` (12s timeout, one retry) → public instances → DuckDuckGo; price/buy questions use `general,shopping`, retailer/review domains are preferred and Wikipedia is excluded.
+3. Entity relevance gate: the main entity must appear in a title/snippet; fewer than 2 hits triggers one broader search, then an explicit “Couldn't find reliable results for X”.
+4. For availability questions the Amazon/Flipkart search pages are fetched directly and linked. Deep-read top pages via Jina Reader with direct-page fallback (Cloudflare blocks are reported).
+5. `format_context` provides fetched page text, published dates and domains; answers open with the fact, include prices in ₹ with variant/seller/date and 2-3 buy domains. Sources show only pages actually used.
 
-Manage: `/websearch status|off|url http://my-searxng:8888`.
+Manage: `/websearch status|off|url http://my-searxng:8888`. Resolved region comes from
+`[search].region` / `GEMMA_REGION` (default India); current month/year is added to
+time-sensitive queries.
 
 ---
 
@@ -389,6 +450,7 @@ theme = "tokyo-night"   # tokyo-night|dracula|deep-purple|nord|cyberpunk|emerald
 [search]
 searxng_url = "http://localhost:8888"
 deep_read = true
+region = "India"          # added to price/latest/best queries
 
 [agent]
 enabled = true
@@ -405,6 +467,8 @@ confirm_commands = false
 | `GEMMA_AGENT_MODE` | `1/true/yes/on` |
 | `GEMMA_WORKSPACE` | workspace dir |
 | `SEARXNG_URL` | search URL |
+| `GEMMA_REGION` | user region for price/latest queries |
+| `GEMMA_TUI_DEBUG_LOG` | resize/debug log path (default `~/.local/state/gemma/tui-debug.log`) |
 
 Sessions DB lives in platform data dir (`sessions.sqlite3`, auto-created, empty sessions pruned).
 
@@ -426,9 +490,10 @@ GEMMA-TUI/
 │   ├── tools.py            # WorkspaceTools + XML/JSON tool parser + system prompt
 │   ├── client.py           # llama.cpp /completion streaming (SSE), <|channel|> strip
 │   ├── orchestrator.py     # realtime heuristics + judge prompt + query candidates
-│   ├── research.py         # SearXNG / Wiki / DDG / Jina Reader + format_context
+│   ├── research.py         # SearXNG / DDG / Jina Reader + query rewrite + relevance gate
+│   ├── attachments.py      # image/video/PDF/text preprocessing + data URIs
 │   ├── commands.py         # /command parser + help text
-│   └── titles.py           # auto session titles
+│   └── titles.py           # auto session titles + background worker
 ├── models/
 │   ├── registry.py         # *.gguf discovery + alias map
 │   └── *.gguf              # (gitignored) your weights
@@ -438,6 +503,11 @@ GEMMA-TUI/
 ├── tui/
 │   ├── app.py              # Textual app (~2600 lines): chat, sidebar, palette, streaming
 │   └── themes.py           # 7 themes + CSS generator
+├── tui-ts/                 # OpenTUI client (Bun + Solid)
+│   ├── src/app.tsx         # shell, keyboard dispatcher, overlays, command palette
+│   ├── src/chat.ts         # sessions, streaming, attachments, cancel/queue
+│   ├── src/attachments.ts  # path paste, chips, kitty/chafa preview helpers
+│   └── src/components/     # composer, sidebar, message cards, pacman status
 ├── searxng/settings.yml    # generated by script (gitignored secret)
 ├── scripts/run_searxng.sh
 ├── main.py                 # python main.py shortcut
@@ -456,8 +526,11 @@ GEMMA-TUI/
 | `/copy` does nothing | Install `wl-copy` (Wayland) or `xclip` (X11) |
 | Garbled theme | `/theme system` for transparent terminal, or try `tokyo-night` |
 | Agent writes to wrong folder | `/agent status`, then `/agent dir <correct-path>` |
-| `Ctrl+C` killed streaming but history looks odd | Cancelled partials aren't saved yet — resend or `/clear` |
-| Where is my data? | `gemma-local config` shows paths; sessions in platform data dir |
+| `Ctrl+C` / `/stop` does nothing | Cancelling is handled by the app; check `Ctrl+X s`. Resize debug log: `~/.local/state/gemma/tui-debug.log` |
+| Image/video attachment rejected | Restart llama-server with `--mmproj models/gemma-4-E4B-it-mmproj-BF16.gguf` (vision disabled otherwise) |
+| Video attachment fails | Install ffmpeg: `sudo pacman -S ffmpeg`; PDF needs `sudo pacman -S poppler` |
+| `Ctrl+C` cancelled a turn but the reply looks odd | Cancelled partials are marked `stopped` and keep the stats line; resend or `/clear` |
+| Where is my data? | `gemma-local config` shows paths; sessions in platform data dir, attachments in `~/.local/share/gemma/attachments/<session_id>/`, server log in `~/.local/state/gemma/server.log` |
 
 **Does it need internet?** No for chat/agent. Only web-search needs network (use local SearXNG to stay on LAN).
 **Does it send code anywhere?** No. Model = localhost HTTP. Search = your SearXNG URL.
