@@ -6,7 +6,7 @@ import re
 import time
 from datetime import datetime
 from html.parser import HTMLParser
-from urllib.parse import unquote, urlencode, urlparse
+from urllib.parse import quote_plus, unquote, urlencode, urlparse
 
 import httpx
 
@@ -84,6 +84,31 @@ def query_entity(query: str) -> str:
         if token not in words:
             words.append(token)
     return " ".join(words[:3])
+
+
+def retailer_pages(query: str, entity: str) -> list[dict[str, str]]:
+    """Direct Amazon/Flipkart search pages for availability questions."""
+    if not entity or not re.search(
+        r"\b(amazon|flipkart|availability|available|e-?commerce|buy)\b", query, re.IGNORECASE
+    ):
+        return []
+    term = quote_plus(entity)
+    return [
+        {
+            "title": f"{entity} - Amazon India",
+            "url": f"https://www.amazon.in/s?k={term}",
+            "snippet": f"Amazon India search results for {entity}, price and stock",
+            "engine": "direct",
+            "date": "",
+        },
+        {
+            "title": f"{entity} - Flipkart",
+            "url": f"https://www.flipkart.com/search?q={term}",
+            "snippet": f"Flipkart search results for {entity}, price and stock",
+            "engine": "direct",
+            "date": "",
+        },
+    ]
 
 
 def relevant_results(
@@ -787,7 +812,11 @@ async def web_search(
             return []
 
         # First pass: rewritten query, shopping category and recency when needed.
+        retailers = _dedupe(retailer_pages(query, entity), set())
         raw = await try_search(query, primary_range, categories)
+        # For availability questions add the retailer search pages themselves;
+        # the deep-read phase fetches their text and we can link them directly.
+        raw.extend([dict(page) for page in retailers])
         filtered = relevant_results(raw, query, intent)
 
         # Second pass: one broader/refined query when the entity gate found too few.
@@ -795,6 +824,8 @@ async def web_search(
             more = await try_search(broader, wider_range, "general")
             # try_search already deduped and extended `seen`.
             filtered = relevant_results(more, query, intent)
+            filtered.extend([dict(page) for page in retailers])
+            filtered = relevant_results(filtered, query, intent)
 
         # Last resort before giving up: DuckDuckGo HTML (never Wikipedia results).
         if len(filtered) < 2:

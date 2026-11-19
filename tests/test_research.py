@@ -106,6 +106,17 @@ async def test_web_search_retries_once_then_broadens(
 
 
 @pytest.mark.asyncio
+async def test_retailer_pages_for_availability() -> None:
+    pages = research.retailer_pages(
+        "Poco X7 Pro availability amazon or flipkart", "poco x7 pro"
+    )
+    assert len(pages) == 2
+    assert any("amazon.in" in page["url"] for page in pages)
+    assert any("flipkart.com" in page["url"] for page in pages)
+    assert research.retailer_pages("current news", "news") == []
+
+
+@pytest.mark.asyncio
 async def test_web_search_returns_empty_when_still_irrelevant(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
