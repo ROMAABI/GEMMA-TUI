@@ -188,13 +188,31 @@ const JSON_HEADERS = { "Content-Type": "application/json", Accept: "application/
 async function readSSE(
   response: Response,
   onPayload: (payload: string) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
   if (!response.body) throw new Error("The server returned no stream body.")
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ""
 
+  if (signal) {
+    if (signal.aborted) {
+      await reader.cancel()
+      throw new DOMException("The user aborted a request.", "AbortError")
+    }
+    signal.addEventListener(
+      "abort",
+      () => {
+        void reader.cancel().catch(() => {})
+      },
+      { once: true },
+    )
+  }
+
   while (true) {
+    if (signal?.aborted) {
+      throw new DOMException("The user aborted a request.", "AbortError")
+    }
     const { done, value } = await reader.read()
     if (done) break
     buffer += decoder.decode(value, { stream: true })
@@ -511,34 +529,38 @@ export class GemmaClient {
     if (!response.ok) throw new Error(`chat failed (${response.status})`)
 
     let failure: Error | null = null
-    await readSSE(response, (payload) => {
-      if (payload === "[DONE]") return
-      let event: {
-        type?: string
-        content?: string
-        message?: string
-        session_id?: string
-        elapsed?: number
-        ttft?: number
-        tokens?: number
-      }
-      try {
-        event = JSON.parse(payload)
-      } catch {
-        return
-      }
-      if (event.type === "start" && event.session_id) handlers.onStart?.(event.session_id)
-      else if (event.type === "token" && typeof event.content === "string") handlers.onToken(event.content)
-      else if (event.type === "done") {
-        handlers.onDone?.({
-          elapsed: Number(event.elapsed ?? 0),
-          ttft: Number(event.ttft ?? 0),
-          tokens: Number(event.tokens ?? 0),
-        })
-      } else if (event.type === "error") {
-        failure = new Error(event.message || "The model returned an error.")
-      }
-    })
+    await readSSE(
+      response,
+      (payload) => {
+        if (payload === "[DONE]") return
+        let event: {
+          type?: string
+          content?: string
+          message?: string
+          session_id?: string
+          elapsed?: number
+          ttft?: number
+          tokens?: number
+        }
+        try {
+          event = JSON.parse(payload)
+        } catch {
+          return
+        }
+        if (event.type === "start" && event.session_id) handlers.onStart?.(event.session_id)
+        else if (event.type === "token" && typeof event.content === "string") handlers.onToken(event.content)
+        else if (event.type === "done") {
+          handlers.onDone?.({
+            elapsed: Number(event.elapsed ?? 0),
+            ttft: Number(event.ttft ?? 0),
+            tokens: Number(event.tokens ?? 0),
+          })
+        } else if (event.type === "error") {
+          failure = new Error(event.message || "The model returned an error.")
+        }
+      },
+      signal,
+    )
     if (failure) throw failure
   }
 
@@ -566,17 +588,21 @@ export class GemmaClient {
     if (response.status === 401) throw new PairingError("Pairing required.")
     if (!response.ok) throw new Error(`agent failed (${response.status})`)
 
-    await readSSE(response, (payload) => {
-      if (payload === "[DONE]") return
-      let event: AgentEvent
-      try {
-        event = JSON.parse(payload) as AgentEvent
-      } catch {
-        return
-      }
-      if (event.type === "start" && event.session_id) handlers.onStart?.(event.session_id)
-      handlers.onEvent(event)
-    })
+    await readSSE(
+      response,
+      (payload) => {
+        if (payload === "[DONE]") return
+        let event: AgentEvent
+        try {
+          event = JSON.parse(payload) as AgentEvent
+        } catch {
+          return
+        }
+        if (event.type === "start" && event.session_id) handlers.onStart?.(event.session_id)
+        handlers.onEvent(event)
+      },
+      signal,
+    )
   }
 }
 

@@ -17,6 +17,13 @@ import {
 } from "./api"
 import { displayModelName, estimateTokens } from "./format"
 
+export interface QueuedMessage {
+  id: string
+  text: string
+  attachments: AttachmentDescriptor[]
+  queuedAt: number
+}
+
 export type ToolStatus = "running" | "done" | "error"
 
 export type Part =
@@ -238,6 +245,7 @@ export function createChat(client: GemmaClient) {
   const [connected, setConnected] = createSignal<boolean | null>(null)
   const [permission, setPermission] = createSignal<AgentEvent | null>(null)
   const [runId, setRunId] = createSignal<string | null>(null)
+  const [messageQueue, setMessageQueue] = createSignal<QueuedMessage[]>([])
   const [live, setLive] = createSignal<{ tokens: number; elapsed: number; ttft: number; genMs?: number }>({
     tokens: 0,
     elapsed: 0,
@@ -396,6 +404,7 @@ export function createChat(client: GemmaClient) {
   async function remove(id: string): Promise<void> {
     const remaining = sessions().filter((session) => session.id !== id)
     if (activeId() === id) {
+      clearQueue()
       controller?.abort()
       controller = null
       streamingFlag = false
@@ -725,6 +734,13 @@ export function createChat(client: GemmaClient) {
     setStreamingId(null)
     setPermission(null)
     setRunId(null)
+    if (messageQueue().length > 0) {
+      // A manual stop ends the current turn but queued messages still run.
+      userStopped = false
+      queueMicrotask(() => {
+        void drainQueue()
+      })
+    }
   }
 
   function applyFailure(
@@ -847,11 +863,11 @@ export function createChat(client: GemmaClient) {
     }
   }
 
-  async function sendChat(raw: string): Promise<void> {
-    const atts = attachments()
+  async function sendChat(raw: string, explicitAtts?: AttachmentDescriptor[]): Promise<void> {
+    const atts = explicitAtts ?? attachments()
     const turn = await startTurn(raw, atts)
     if (!turn) return
-    clearAttachments()
+    if (!explicitAtts) clearAttachments()
     const { sessionId, assistantId, startedAt } = turn
     let firstAt: number | null = null
     let tokens = 0
@@ -919,11 +935,11 @@ export function createChat(client: GemmaClient) {
     }
   }
 
-  async function sendAgent(raw: string): Promise<void> {
-    const atts = attachments()
+  async function sendAgent(raw: string, explicitAtts?: AttachmentDescriptor[]): Promise<void> {
+    const atts = explicitAtts ?? attachments()
     const turn = await startTurn(raw, atts)
     if (!turn) return
-    clearAttachments()
+    if (!explicitAtts) clearAttachments()
     const { sessionId, assistantId, startedAt } = turn
     let firstAt: number | null = null
     let tokens = 0
@@ -1190,12 +1206,9 @@ export function createChat(client: GemmaClient) {
     }
   }
 
-  function send(raw: string): Promise<void> {
-    return mode() === "agent" ? sendAgent(raw) : sendChat(raw)
-  }
-
   function stop(): void {
     userStopped = true
+    clearQueue()
     const current = runId()
     if (current) {
       try {
@@ -1211,6 +1224,61 @@ export function createChat(client: GemmaClient) {
     } catch {
       // Same: an already-aborted controller is not an error.
     }
+  }
+
+  function queueMessage(text: string, atts?: AttachmentDescriptor[]): void {
+    const trimmed = text.trim()
+    if (!trimmed) return
+    const resolvedAtts = atts ? [...atts] : [...attachments()]
+    clearAttachments()
+    const item: QueuedMessage = {
+      id: nextId("q"),
+      text: trimmed,
+      attachments: resolvedAtts,
+      queuedAt: Date.now(),
+    }
+    setMessageQueue((prev) => [...prev, item])
+  }
+
+  function dequeueMessage(id?: string): QueuedMessage | undefined {
+    let removed: QueuedMessage | undefined
+    setMessageQueue((prev) => {
+      if (!prev.length) return prev
+      if (!id) {
+        removed = prev[0]
+        return prev.slice(1)
+      }
+      const idx = prev.findIndex((item) => item.id === id)
+      if (idx === -1) return prev
+      removed = prev[idx]
+      return [...prev.slice(0, idx), ...prev.slice(idx + 1)]
+    })
+    return removed
+  }
+
+  function clearQueue(): void {
+    setMessageQueue([])
+  }
+
+  async function drainQueue(): Promise<void> {
+    if (streamingFlag || userStopped) return
+    const next = dequeueMessage()
+    if (!next) return
+    if (mode() === "agent") {
+      await sendAgent(next.text, next.attachments)
+    } else {
+      await sendChat(next.text, next.attachments)
+    }
+  }
+
+  function send(raw: string): Promise<void> {
+    const text = raw.trim()
+    if (!text) return Promise.resolve()
+    if (streaming()) {
+      queueMessage(text)
+      return Promise.resolve()
+    }
+    return mode() === "agent" ? sendAgent(text) : sendChat(text)
   }
 
   function wasStopped(error: unknown): boolean {
@@ -1339,8 +1407,13 @@ export function createChat(client: GemmaClient) {
     compactChat,
     send,
     stop,
+    messageQueue,
+    queueMessage,
+    dequeueMessage,
+    clearQueue,
     respondPermission,
     setNotice,
+    live,
   }
 }
 

@@ -5,13 +5,36 @@ import type { Chat } from "../chat"
 import { LAYOUT } from "../layout"
 import { colors } from "../theme"
 import { MessageCard } from "./message"
+import { deriveAgentState } from "./agent-state"
 
 /** Scrollable transcript for the active session. */
-export function Feed(props: { chat: Chat; accent: ColorInput; onCopy: (text: string) => void }) {
+export function Feed(props: {
+  chat: Chat
+  accent: ColorInput
+  contentWidth: number
+  onCopy: (text: string) => void
+}) {
   let box: ScrollBoxRenderable | undefined
   const session = createMemo(() => props.chat.activeSession())
   const messages = createMemo(() => session()?.messages ?? [])
   const streamingId = createMemo(() => props.chat.streamingId())
+  const isStreaming = createMemo(() => props.chat.streaming())
+
+  // Dynamic live agent state
+  const activeMessage = createMemo(() => {
+    const sId = streamingId()
+    if (!sId) return undefined
+    return messages().find((m) => m.id === sId)
+  })
+
+  const liveState = createMemo(() =>
+    deriveAgentState(
+      isStreaming(),
+      activeMessage(),
+      props.chat.live(),
+      props.chat.metrics().tokPerSec,
+    ),
+  )
 
   // Follow the tail while a reply streams in.
   createEffect(
@@ -47,6 +70,8 @@ export function Feed(props: { chat: Chat; accent: ColorInput; onCopy: (text: str
                 accent={props.accent}
                 streaming={streamingId() === message.id}
                 showThinking={props.chat.showThinking()}
+                phase={streamingId() === message.id ? liveState().phase : undefined}
+                elapsed={streamingId() === message.id ? liveState().elapsed : undefined}
                 onCopy={props.onCopy}
               />
             )}

@@ -1,8 +1,11 @@
+import { PacManCorridorBar, type AgentPhase } from "./pacman"
 import { For, Show, createEffect, createMemo, createSignal, on } from "solid-js"
 import { useTerminalDimensions } from "@opentui/solid"
 import type { KeyEvent, TextareaRenderable } from "@opentui/core"
-import type { AttachmentDescriptor, CommandDef } from "../api"
-import { attachmentIcon, attachmentLabel, extractPaths, isDirectoryPath } from "../attachments"
+import type { AttachmentDescriptor } from "../api"
+import { attachmentIcon, attachmentLabel, extractPaths, formatBytes, isDirectoryPath } from "../attachments"
+import type { CommandDef } from "../api"
+import type { QueuedMessage } from "../chat"
 import { colors, type ResolvedTheme } from "../theme"
 import { displayModelName, truncate } from "../format"
 
@@ -47,6 +50,14 @@ export function Composer(props: {
   onPicker: () => void
   onPasteImage: () => void
   suggestPaths: (query: string) => Promise<string[]>
+  phase?: AgentPhase
+  elapsed?: number
+  tokensPerSecond?: number
+  messageQueue?: QueuedMessage[]
+  onRemoveQueueItem?: (id: string) => void
+  onClearQueue?: () => void
+  /** Shared with the app's global key handler so it knows what the prompt owns. */
+  state?: { text: string; paletteOpen: boolean }
 }) {
   const [value, setValue] = createSignal("")
   const [selected, setSelected] = createSignal(0)
@@ -93,6 +104,16 @@ export function Composer(props: {
     }),
   )
 
+  // Published synchronously from the input handlers: the app's global key
+  // handler runs before this component and cannot wait for a reactive effect.
+  const syncState = () => {
+    if (!props.state) return
+    props.state.text = value()
+    props.state.paletteOpen = paletteOpen()
+  }
+  // A freshly mounted prompt starts empty even if the previous one had a draft.
+  syncState()
+
   createEffect(
     on(
       () => props.active,
@@ -119,6 +140,7 @@ export function Composer(props: {
     setValue(text)
     setDismissed(false)
     setSelected(0)
+    syncState()
   }
 
   createEffect(
@@ -195,6 +217,7 @@ export function Composer(props: {
       if (event.name === "escape") {
         event.preventDefault()
         setDismissed(true)
+        syncState()
         return
       }
     }
@@ -218,6 +241,7 @@ export function Composer(props: {
     } else if (event.name === "escape") {
       event.preventDefault()
       setDismissed(true)
+      syncState()
     }
   }
 
@@ -230,6 +254,7 @@ export function Composer(props: {
     setValue(area?.plainText ?? "")
     setSelected(0)
     setDismissed(false)
+    syncState()
   }
 
   const modelBudget = () => Math.max(6, props.width - 14)
@@ -364,26 +389,40 @@ export function Composer(props: {
       marginTop={1}
       flexShrink={0}
     >
-      <box flexDirection="row" flexShrink={0}>
-        <text
-          bg={props.mode === "agent" ? props.accent.accent : colors().element}
-          style={{ fg: props.mode === "agent" ? colors().page : colors().dim }}
-        >
-          <b>{" "}{props.mode}{" "}</b>
-        </text>
-        <text style={{ fg: colors().faint }}> tab mode</text>
-      </box>
-      <text flexShrink={0} truncate>
-        <span style={{ fg: colors().faint }}>{props.provider}</span>
-        <Show when={props.provider}>
-          <span style={{ fg: colors().faint }}> · </span>
-        </Show>
-        <span style={{ fg: colors().faint }}>ctrl+k models</span>
-        <Show when={props.width >= 70}>
-          <span style={{ fg: colors().faint }}> · ctrl+o attach</span>
-          <span style={{ fg: colors().faint }}> · ctrl+b sidebar</span>
-        </Show>
-      </text>
+      <Show
+        when={props.streaming}
+        fallback={
+          <>
+            <box flexDirection="row" flexShrink={0}>
+              <text
+                bg={props.mode === "agent" ? props.accent.accent : colors().element}
+                style={{ fg: props.mode === "agent" ? colors().page : colors().dim }}
+              >
+                <b>{" "}{props.mode}{" "}</b>
+              </text>
+              <text style={{ fg: colors().faint }}> tab mode</text>
+            </box>
+            <text flexShrink={0} truncate>
+              <span style={{ fg: colors().faint }}>{props.provider}</span>
+              <Show when={props.provider}>
+                <span style={{ fg: colors().faint }}> · </span>
+              </Show>
+              <span style={{ fg: colors().faint }}>ctrl+k models</span>
+              <Show when={props.width >= 70}>
+                <span style={{ fg: colors().faint }}> · ctrl+o attach</span>
+                <span style={{ fg: colors().faint }}> · ctrl+b sidebar</span>
+              </Show>
+            </text>
+          </>
+        }
+      >
+        <PacManCorridorBar
+          phase={props.phase ?? "thinking"}
+          elapsed={props.elapsed ?? 0}
+          width={props.width}
+          tokensPerSecond={props.tokensPerSecond}
+        />
+      </Show>
     </box>
   )
 
@@ -410,7 +449,11 @@ export function Composer(props: {
         <box flexDirection="column" width={props.width} border borderStyle="rounded" borderColor={colors().border} backgroundColor={colors().panel} paddingLeft={1} flexShrink={0}>
           <For each={pathOptions().slice(0, 8)}>
             {(path, index) => (
-              <text height={1} truncate style={{ fg: index() === pathSelected() ? props.accent.accent : colors().dim }}>
+              <text
+                height={1}
+                truncate
+                style={{ fg: index() === pathSelected() ? props.accent.accent : colors().dim }}
+              >
                 {`${index() === pathSelected() ? "▸" : " "} ${path}`}
               </text>
             )}
@@ -419,6 +462,40 @@ export function Composer(props: {
       </Show>
       <Show when={paletteOpen() && props.placement === "above"}>
         <Palette />
+      </Show>
+
+      <Show when={(props.messageQueue?.length ?? 0) > 0}>
+        <box
+          flexDirection="row"
+          width={props.width}
+          alignItems="center"
+          justifyContent="space-between"
+          backgroundColor={colors().element}
+          paddingLeft={1}
+          paddingRight={1}
+          marginBottom={1}
+          flexShrink={0}
+        >
+          <box flexDirection="row" alignItems="center" gap={1} flexGrow={1} minWidth={0}>
+            <text style={{ fg: colors().warning }}>
+              <b>{`Queued (${props.messageQueue!.length}):`}</b>
+            </text>
+            <text style={{ fg: colors().text }} flexGrow={1} truncate>
+              {`"${props.messageQueue![0]!.text}"`}
+            </text>
+          </box>
+          <box flexDirection="row" alignItems="center" gap={1} flexShrink={0}>
+            <Show when={props.width >= 60}>
+              <text style={{ fg: colors().faint }}>ctrl+u clear</text>
+            </Show>
+            <text
+              style={{ fg: colors().danger }}
+              onMouseDown={() => props.onClearQueue?.()}
+            >
+              <b>✕ clear</b>
+            </text>
+          </box>
+        </box>
       </Show>
 
       <Pill />

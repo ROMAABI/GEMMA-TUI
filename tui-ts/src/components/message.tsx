@@ -8,6 +8,7 @@ import type { Message, Part } from "../chat"
 import { colors } from "../theme"
 import { clockTime, formatNumber, formatSeconds } from "../format"
 import { MarkdownView, PlainView } from "./markdown"
+import { PacManHeaderSpinner, type AgentPhase } from "./pacman"
 
 function summarizeArgs(args: Record<string, unknown>): string {
   const preferred = ["command", "path", "file_path", "pattern", "query", "url", "name", "prompt"]
@@ -37,49 +38,45 @@ function ToolBlock(props: { part: Extract<Part, { kind: "tool" }>; accent: Color
       : ""
   const preview = createMemo(() => {
     const text = (props.part.result ?? "").trim()
-    if (!text) return { lines: [] as string[], hidden: 0 }
-    const lines = text.split("\n")
-    const shown = lines.slice(0, 15)
-    return { lines: shown, hidden: Math.max(lines.length - shown.length, 0) }
+    if (!text) return ""
+    const firstLine = text.split("\n")[0] ?? ""
+    return firstLine.length > 56 ? `${firstLine.slice(0, 55)}…` : firstLine
   })
+  const summary = createMemo(() => summarizeArgs(props.part.args))
 
   return (
-    <box flexDirection="column" flexShrink={0} marginTop={1}>
+    <box
+      flexDirection="column"
+      flexShrink={0}
+      marginTop={1}
+      border={["left"]}
+      borderColor={color()}
+      paddingLeft={1}
+    >
       <box flexDirection="row" height={1} gap={1}>
-        <text style={{ fg: color() }}>{icon()}</text>
+        <text style={{ fg: color() }}>
+          <b>{icon()}</b>
+        </text>
         <text style={{ fg: colors().text }}>
           <b>{props.part.name}</b>
         </text>
-        <text style={{ fg: colors().faint }} truncate>
-          {summarizeArgs(props.part.args)}
-        </text>
+        <Show when={summary()}>
+          <text style={{ fg: colors().dim }} truncate>
+            {summary()}
+          </text>
+        </Show>
+        <box flexGrow={1} />
         <Show when={duration()}>
           <text style={{ fg: colors().faint }}>{duration()}</text>
         </Show>
       </box>
-      <Show when={preview().lines.length}>
-        <box
-          border={["left"]}
-          borderColor={colors().border}
-          paddingLeft={1}
-          marginLeft={1}
-          flexDirection="column"
-          flexShrink={0}
+      <Show when={preview() && props.part.status !== "running"}>
+        <text
+          style={{ fg: props.part.status === "error" ? colors().danger : colors().muted }}
+          truncate
         >
-          <For each={preview().lines}>
-            {(line) => (
-              <text
-                style={{ fg: props.part.status === "error" ? colors().danger : colors().muted }}
-                wrapMode="word"
-              >
-                {line || " "}
-              </text>
-            )}
-          </For>
-          <Show when={preview().hidden > 0}>
-            <text style={{ fg: colors().faint }}>{`… ${preview().hidden} more lines`}</text>
-          </Show>
-        </box>
+          {preview()}
+        </text>
       </Show>
     </box>
   )
@@ -138,22 +135,37 @@ function SourcesBlock(props: { sources?: Array<{ title: string; domain: string; 
 /** Attachment chip with a small inline preview when the terminal can show one. */
 function AttachmentCard(props: { attachment: AttachmentDescriptor; accent: ColorInput }) {
   const art = createMemo(() =>
-    props.attachment.preview && !kittySupported()
-      ? chafaLines(props.attachment.preview)
-      : [],
+    props.attachment.preview && !kittySupported() ? chafaLines(props.attachment.preview) : [],
   )
   return (
-    <box flexDirection="column" flexShrink={0} marginTop={1} border={["left"]} borderColor={colors().border} paddingLeft={1}>
-      <text style={{ fg: props.accent }}>
-        {`${attachmentIcon(props.attachment.kind)} ${attachmentLabel(props.attachment)}`}
-      </text>
-      <Show when={kittySupported() && props.attachment.preview}>
-        <image source={props.attachment.preview!} width={16} height={8} fit="fit" />
-      </Show>
+    <box
+      flexDirection="column"
+      marginTop={1}
+      backgroundColor={colors().panel}
+      border
+      borderStyle="rounded"
+      borderColor={colors().border}
+      paddingLeft={1}
+      paddingRight={1}
+      flexShrink={0}
+    >
+      <box flexDirection="row" height={1} gap={1}>
+        <text style={{ fg: props.accent }}>{attachmentIcon(props.attachment.kind)}</text>
+        <text style={{ fg: colors().text }} flexGrow={1} truncate>
+          {attachmentLabel(props.attachment)}
+        </text>
+        <text style={{ fg: colors().faint }}>{props.attachment.kind}</text>
+      </box>
       <Show when={art().length > 0}>
-        <For each={art()}>
-          {(line) => <text style={{ fg: colors().faint }}>{line}</text>}
-        </For>
+        <box flexDirection="column" marginTop={1}>
+          <For each={art()}>
+            {(line) => (
+              <text flexShrink={0}>
+                {line}
+              </text>
+            )}
+          </For>
+        </box>
       </Show>
     </box>
   )
@@ -165,28 +177,31 @@ function SearchBlock(props: { search: NonNullable<Message["search"]>; accent: Co
     <Switch>
       <Match when={props.search.status === "searching"}>
         <box flexDirection="row" height={1} gap={1} marginTop={1}>
-          <text style={{ fg: props.accent }}>✦</text>
-          <text style={{ fg: colors().muted }} truncate>
-            {`searching… ${props.search.query ?? ""}`.trim()}
+          <text style={{ fg: colors().warning }}>▸</text>
+          <text style={{ fg: colors().text }}>
+            <b>search</b>
           </text>
+          <text style={{ fg: colors().dim }}>searching the web…</text>
         </box>
       </Match>
       <Match when={props.search.status === "reading"}>
         <box flexDirection="row" height={1} gap={1} marginTop={1}>
-          <text style={{ fg: props.accent }}>✦</text>
-          <text style={{ fg: colors().muted }}>
-            {`reading ${props.search.count ?? props.search.sources?.length ?? 0} pages…`}
+          <text style={{ fg: colors().warning }}>▸</text>
+          <text style={{ fg: colors().text }}>
+            <b>read</b>
+          </text>
+          <text style={{ fg: colors().dim }}>
+            {`reading ${props.search.count ?? 0} pages…`}
           </text>
         </box>
       </Match>
       <Match when={props.search.status === "failed"}>
-        <box flexDirection="row" gap={1} marginTop={1} flexShrink={0}>
-          <text style={{ fg: colors().danger }}>⚠</text>
-          <text style={{ fg: colors().danger }} wrapMode="word" flexGrow={1}>
-            {`Web search failed: ${props.search.error ?? "unavailable"} — answering from model memory`}
+        <box flexDirection="row" height={1} gap={1} marginTop={1}>
+          <text style={{ fg: colors().danger }}>✗</text>
+          <text style={{ fg: colors().danger }}>
+            {props.search.error ?? "search failed"}
           </text>
         </box>
-        <SourcesBlock sources={props.search.sources} />
       </Match>
       <Match when={props.search.status === "ok"}>
         <SourcesBlock sources={props.search.sources} />
@@ -201,9 +216,32 @@ export function MessageCard(props: {
   accent: ColorInput
   streaming: boolean
   showThinking: boolean
+  phase?: AgentPhase
+  elapsed?: number
   onCopy: (text: string) => void
 }) {
   const isUser = () => props.message.role === "user"
+
+  // Derive active phase dynamically from message parts and search if not explicitly passed
+  const currentPhase = createMemo<AgentPhase>(() => {
+    if (props.phase) return props.phase
+    if (props.message.search?.status === "searching") return "searching"
+    if (props.message.search?.status === "reading") return "reading"
+    const runningTool = props.message.parts.find(
+      (p): p is Extract<Part, { kind: "tool" }> => p.kind === "tool" && p.status === "running",
+    )
+    if (runningTool) {
+      const name = runningTool.name.toLowerCase()
+      if (name.includes("bash") || name.includes("command") || name.includes("exec")) return "bash"
+      if (name.includes("search") || name.includes("find") || name.includes("grep")) return "searching"
+      if (name.includes("read") || name.includes("view") || name.includes("fetch")) return "reading"
+      return "bash"
+    }
+    const lastPart = props.message.parts[props.message.parts.length - 1]
+    if (lastPart?.kind === "reasoning") return "thinking"
+    if (lastPart?.kind === "text") return "writing"
+    return "thinking"
+  })
 
   return (
     <box flexDirection="column" width="100%" flexShrink={0} marginBottom={1}>
@@ -211,13 +249,16 @@ export function MessageCard(props: {
         when={isUser()}
         fallback={
           <box flexDirection="column" width="100%" paddingLeft={1} paddingRight={1}>
-            <box flexDirection="row" height={1} gap={1}>
+            <box flexDirection="row" height={1} gap={1} alignItems="center">
               <text style={{ fg: props.accent }}>
                 <b>gemma</b>
               </text>
               <text style={{ fg: colors().faint }}>{clockTime(props.message.createdAt)}</text>
               <Show when={props.streaming}>
-                <text style={{ fg: colors().warning }}>● working</text>
+                <PacManHeaderSpinner
+                  phase={currentPhase()}
+                  elapsed={props.elapsed ?? props.message.elapsed ?? 0}
+                />
               </Show>
               <Show when={props.message.stopped}>
                 <text style={{ fg: colors().warning }}>stopped</text>

@@ -13,6 +13,7 @@ import { Header } from "./components/topbar"
 import { Landing } from "./components/landing"
 import { Composer, type Inject } from "./components/composer"
 import { StatusBar } from "./components/statusbar"
+import { deriveAgentState } from "./components/agent-state"
 import {
   ModelPicker,
   HelpOverlay,
@@ -279,6 +280,15 @@ export function App(props: { chat: Chat }) {
       return
     }
 
+    if (ctrl && name === "u") {
+      if (props.chat.messageQueue().length > 0) {
+        key.preventDefault()
+        props.chat.clearQueue()
+        flash("Message queue cleared")
+        return
+      }
+    }
+
     if (ctrl && name === "o") {
       key.preventDefault()
       setOverlay({ kind: "picker" })
@@ -392,6 +402,15 @@ export function App(props: { chat: Chat }) {
           props.chat.stop()
           flash("Stopping…")
         } else flash("Nothing is running")
+        return true
+      case "/queue":
+        if (arg === "clear") {
+          props.chat.clearQueue()
+          flash("Message queue cleared")
+        } else {
+          const q = props.chat.messageQueue()
+          flash(q.length ? `Queue (${q.length}): ${q.map((m) => `"${m.text}"`).join(", ")}` : "Queue is empty")
+        }
         return true
       case "/new":
         void props.chat.newChat()
@@ -763,6 +782,21 @@ export function App(props: { chat: Chat }) {
     return Math.min(main - 4, Math.max(46, Math.round(main * 0.7)))
   }
 
+  const activeAssistantMessage = createMemo(() => {
+    const sId = props.chat.streamingId()
+    if (!sId) return undefined
+    return props.chat.activeSession()?.messages.find((m) => m.id === sId)
+  })
+
+  const liveAgentState = createMemo(() =>
+    deriveAgentState(
+      streaming(),
+      activeAssistantMessage(),
+      props.chat.live(),
+      metrics().tokPerSec,
+    ),
+  )
+
   const ComposerBlock = (blockProps: { placement: "above" | "below" }) => (
     <Composer
       accent={accent()}
@@ -787,6 +821,12 @@ export function App(props: { chat: Chat }) {
       onPicker={() => setOverlay({ kind: "picker" })}
       onPasteImage={() => void props.chat.pasteImage()}
       suggestPaths={(query) => props.chat.client.suggestPaths(query).then((data) => data.paths)}
+      phase={liveAgentState().phase}
+      elapsed={liveAgentState().elapsed}
+      tokensPerSecond={liveAgentState().tokensPerSecond}
+      messageQueue={props.chat.messageQueue()}
+      onRemoveQueueItem={(id) => props.chat.dequeueMessage(id)}
+      onClearQueue={() => props.chat.clearQueue()}
       state={composerState}
     />
   )
@@ -877,6 +917,7 @@ export function App(props: { chat: Chat }) {
                 <Feed
                   chat={props.chat}
                   accent={accent().accent}
+                  contentWidth={contentWidth()}
                   onCopy={copyText}
                 />
                 <ComposerBlock placement="above" />

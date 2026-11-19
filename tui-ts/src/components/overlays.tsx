@@ -318,7 +318,8 @@ const KEYS: Array<[string, string]> = [
   ["Ctrl+P", "command palette"],
   ["Ctrl+Y", "copy last reply"],
   ["Ctrl+W", "pair a browser"],
-  ["Ctrl+C", "stop streaming"],
+  ["Ctrl+C", "stop streaming · flush queue"],
+  ["Ctrl+U", "clear message queue"],
   ["Esc", "close palette · focus prompt"],
 ]
 

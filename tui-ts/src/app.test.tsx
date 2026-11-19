@@ -845,6 +845,37 @@ describe("OpenTUI client", () => {
     expect(chat.activeId()).not.toBe("s1")
   })
 
+  test("Delete edits the draft instead of deleting the session", async () => {
+    current = startMock()
+    const { setup, chat } = await mount(current)
+    setupRef = setup
+
+    setup.mockInput.typeText("hello")
+    await setup.renderOnce()
+    setup.mockInput.pressKey("DELETE")
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    await setup.renderOnce()
+
+    expect(chat.sessions().some((session) => session.id === "s1")).toBe(true)
+    expect(chat.activeId()).toBe("s1")
+  })
+
+  test("closes the slash palette with Escape", async () => {
+    current = startMock()
+    const { setup } = await mount(current)
+    setupRef = setup
+
+    setup.mockInput.typeText("/")
+    await setup.waitForFrame((text: string) => text.includes("Start a new chat"))
+
+    setup.mockInput.pressKey("ESCAPE")
+    // A lone ESC is released by the parser after its escape timeout.
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    await setup.renderOnce()
+
+    expect(setup.captureCharFrame()).not.toContain("Start a new chat")
+  })
+
   test("/compact folds the session into a checkpoint", async () => {
     current = startMock()
     const { setup, chat } = await mount(current)
