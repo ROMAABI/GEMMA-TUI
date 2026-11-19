@@ -235,6 +235,8 @@ class SessionStore:
             metadata = message.get("metadata") or {}
             if metadata.get("tool_calls"):
                 item["tool_calls"] = metadata["tool_calls"]
+            if metadata.get("attachments"):
+                item["attachments"] = metadata["attachments"]
             if message.get("tool_call_id"):
                 item["tool_call_id"] = message["tool_call_id"]
             if message.get("name"):

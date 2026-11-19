@@ -244,7 +244,10 @@ class AgentOrchestrator:
                 continue
             if role not in ("user", "assistant", "tool"):
                 continue
-            cleaned: dict[str, Any] = {"role": role, "content": str(content)}
+            cleaned: dict[str, Any] = {
+                "role": role,
+                "content": content if isinstance(content, list) else str(content),
+            }
             if role == "assistant" and message.get("tool_calls"):
                 cleaned["tool_calls"] = message["tool_calls"]
             if role == "tool":

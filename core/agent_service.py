@@ -37,6 +37,7 @@ class AgentRun:
     run_id: str
     session_id: str
     created: float = field(default_factory=time.monotonic)
+    attachments: list[dict[str, Any]] = field(default_factory=list)
     events: "queue.Queue[dict[str, Any] | None]" = field(default_factory=queue.Queue)
     future: Any = None
     aborted: bool = False
@@ -310,11 +311,26 @@ class AgentRuntime:
             session_id=session_id,
         )
 
-    def start(self, session_id: str, message: str, context: str = "") -> AgentRun:
+    def start(
+        self,
+        session_id: str,
+        message: str,
+        context: str = "",
+        attachments: list[dict[str, Any]] | None = None,
+    ) -> AgentRun:
         """Persist the user turn and launch an agent run; drain ``run.events``."""
         if message.strip():
-            self.store.add_message(session_id, "user", message)
-        run = AgentRun(run_id=secrets.token_urlsafe(9), session_id=session_id)
+            self.store.add_message(
+                session_id,
+                "user",
+                message,
+                metadata={"attachments": attachments or []},
+            )
+        run = AgentRun(
+            run_id=secrets.token_urlsafe(9),
+            session_id=session_id,
+            attachments=attachments or [],
+        )
         with self._lock:
             self._runs[run.run_id] = run
         run.future = self._submit(self._execute(run, context))
@@ -357,6 +373,33 @@ class AgentRuntime:
                 extra_context=context,
             )
             messages = self.store.context_messages(run.session_id)
+            from core.attachments import multimodal_messages, recent_attachment_messages
+
+            messages, stale = recent_attachment_messages(messages)
+            if stale:
+                messages.insert(
+                    1,
+                    {
+                        "role": "system",
+                        "content": "Older attachments (text markers only):\n" + "\n".join(stale),
+                    },
+                )
+            messages = multimodal_messages(messages)
+            from core.attachments import vision_supported
+
+            if any(
+                msg.get("attachments")
+                for msg in messages
+            ) and not vision_supported(self.settings.base_url):
+                run.emit(
+                    {
+                        "type": "error",
+                        "run_id": run.run_id,
+                        "message": "Image/video attachment needs llama.cpp started with --mmproj. "
+                        "Restart with: --mmproj models/gemma-4-E4B-it-mmproj-BF16.gguf",
+                    }
+                )
+                return
             # Prime the model's prompt cache with the (large) agent prefix so
             # the first streaming step doesn't re-prefill it from scratch.
             warmup = getattr(orchestrator, "warmup", None)

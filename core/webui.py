@@ -30,6 +30,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from config.settings import Settings
 from core.agent_service import AgentRuntime
+from core.attachments import recent_attachment_messages
 from core.client import LlamaClient
 from sessions.store import SessionStore
 from utils.paths import server_log_path
@@ -220,15 +221,23 @@ class GemmaWebServer:
         return True
 
     # ── chat ────────────────────────────────────────────────────────────
-    def build_messages(self, session_id: str, context: str = "") -> list[dict[str, str]]:
-        history = [
-            {"role": str(item.get("role")), "content": str(item.get("content") or "")}
-            for item in self.store.messages(session_id)
-        ]
-        messages = [{"role": "system", "content": _system_prompt()}] + history
-        if context.strip():
-            # Web research context rides in as a system message, like the TUI did.
-            messages.insert(1, {"role": "system", "content": context})
+    def build_messages(self, session_id: str, context: str = "") -> list[dict[str, Any]]:
+        raw = []
+        for item in self.store.messages(session_id):
+            message: dict[str, Any] = {
+                "role": str(item.get("role")),
+                "content": str(item.get("content") or ""),
+            }
+            metadata = item.get("metadata") or {}
+            if metadata.get("attachments"):
+                message["attachments"] = metadata["attachments"]
+            raw.append(message)
+        history, stale = recent_attachment_messages(raw)
+        messages: list[dict[str, Any]] = [{"role": "system", "content": _system_prompt()}]
+        extra = "\n".join([*stale, context.strip()]).strip()
+        if extra:
+            messages.append({"role": "system", "content": extra})
+        messages.extend(history)
         return messages
 
     def queue_title(self, session_id: str, reply: str) -> None:
@@ -243,21 +252,40 @@ class GemmaWebServer:
 
     async def _pump_chat(self, handler: "_Handler", session_id: str, context: str = "") -> None:
         client = LlamaClient(self.settings)
+        from core.attachments import multimodal_messages
+        from core.providers import NativeToolProvider
+
+        messages = self.build_messages(session_id, context)
+        has_images = any(item.get("attachments") for item in messages)
+        provider = NativeToolProvider(self.settings) if has_images else None
         started = time.monotonic()
         first_at: float | None = None
         text = ""
         tokens = 0
+        prompt_tokens = 0
         try:
-            async for chunk in client.stream_chat(
-                self.build_messages(session_id, context), prefill=bool(context)
-            ):
-                if not chunk:
-                    continue
-                if first_at is None:
-                    first_at = time.monotonic()
-                text += chunk
-                tokens += 1
-                handler.emit({"type": "token", "content": chunk})
+            if provider is not None:
+                async for event in provider.stream(
+                    multimodal_messages(messages), [], max_tokens=1024
+                ):
+                    if event.type == "text" and event.text:
+                        if first_at is None:
+                            first_at = time.monotonic()
+                        text += event.text
+                        tokens += 1
+                        handler.emit({"type": "token", "content": event.text})
+                    elif event.type == "usage":
+                        prompt_tokens = int(event.usage.get("input_tokens") or 0)
+                        tokens = max(tokens, int(event.usage.get("output_tokens") or tokens))
+            else:
+                async for chunk in client.stream_chat(messages, prefill=bool(context)):
+                    if not chunk:
+                        continue
+                    if first_at is None:
+                        first_at = time.monotonic()
+                    text += chunk
+                    tokens += 1
+                    handler.emit({"type": "token", "content": chunk})
             elapsed = max(time.monotonic() - started, 0.001)
             ttft = (first_at - started) if first_at else elapsed
             if text.strip():
@@ -269,6 +297,7 @@ class GemmaWebServer:
                     "elapsed": round(elapsed, 3),
                     "ttft": round(ttft, 3),
                     "tokens": tokens,
+                    "prompt_tokens": prompt_tokens,
                 }
             )
         except (BrokenPipeError, ConnectionResetError):
@@ -378,6 +407,15 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(self._info())
         elif path == "/api/logs":
             self._server_log()
+        elif path == "/api/attachments/capabilities":
+            from core.attachments import capabilities
+
+            self._json(capabilities(self.gemma.settings.base_url))
+        elif path == "/api/attachments/suggest":
+            from core.attachments import suggest_paths
+
+            query = (parse_qs(urlparse(self.path).query).get("q") or [""])[0]
+            self._json({"paths": suggest_paths(query)})
         elif path == "/api/sessions":
             self._json({"sessions": self._sessions()})
         elif path == "/api/models":
@@ -429,6 +467,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._agent_settings()
         elif path in ("/api/mcp", "/api/skills", "/api/lsp"):
             self._service_action(path.split("/")[-1])
+        elif path == "/api/attachments/prepare":
+            self._attachment_prepare()
         elif path == "/api/research/prepare":
             self._research_prepare()
         elif path == "/api/research/read":
@@ -507,8 +547,13 @@ class _Handler(BaseHTTPRequestHandler):
             active = self.gemma.agent.providers()["active"]
         except Exception:  # noqa: BLE001 - info must always answer
             active = {"provider": "llama.cpp", "model": settings.model}
+        from core.attachments import capabilities
+
+        caps = capabilities(settings.base_url)
         return {
             "app": "gemma",
+            "vision": caps["vision"],
+            "attachments": caps,
             "version": "0.1.0",
             "model": settings.model,
             "mode": "agent" if settings.agent_mode else "chat",
@@ -616,7 +661,12 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.emit({"type": "start", "session_id": session_id})
         try:
-            run = self.gemma.agent.start(session_id, message, context=context)
+            attachments = body.get("attachments") or []
+            if attachments:
+                from core.attachments import relocate_attachment
+
+                attachments = [relocate_attachment(dict(a), session_id) for a in attachments]
+            run = self.gemma.agent.start(session_id, message, context=context, attachments=attachments)
             self.emit({"type": "run", "run_id": run.run_id, "session_id": session_id})
             self._drain(run)
         except (BrokenPipeError, ConnectionResetError):
@@ -807,6 +857,42 @@ class _Handler(BaseHTTPRequestHandler):
             self._json({"error": str(exc)}, 500)
             return
         self._json({"ok": True, "service": service, "action": action, "status": status})
+
+    # ── attachments ──────────────────────────────────────────────────────
+    def _attachment_prepare(self) -> None:
+        try:
+            body = self._read_json()
+        except (ValueError, json.JSONDecodeError):
+            self._json({"error": "invalid json"}, 400)
+            return
+        raw_path = str(body.get("path") or "").strip()
+        session_id = str(body.get("session_id") or "new").strip()
+        if not raw_path:
+            self._json({"error": "path required"}, 400)
+            return
+        from core.attachments import AttachmentError, capabilities, prepare_attachment
+
+        if Path(raw_path).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}:
+            caps = capabilities(self.gemma.settings.base_url)
+            if not caps["vision"]:
+                self._json(
+                    {
+                        "error": "Image attachments need llama.cpp started with --mmproj. "
+                        "Restart the server with: --mmproj models/gemma-4-E4B-it-mmproj-BF16.gguf",
+                        "vision": False,
+                    },
+                    400,
+                )
+                return
+        try:
+            descriptor = prepare_attachment(session_id, raw_path)
+        except AttachmentError as exc:
+            self._json({"error": str(exc)}, 400)
+            return
+        except Exception as exc:  # noqa: BLE001 - user-facing error
+            self._json({"error": f"Could not attach file: {exc}"}, 400)
+            return
+        self._json({"ok": True, "attachment": descriptor})
 
     # ── web research (SearXNG) ──────────────────────────────────────────
 
@@ -1154,7 +1240,17 @@ class _Handler(BaseHTTPRequestHandler):
         session_id = str(body.get("session_id") or "").strip()
         if not session_id or self.gemma.store.get_session(session_id) is None:
             session_id = self.gemma.store.create_session()
-        self.gemma.store.add_message(session_id, "user", message)
+        attachments = body.get("attachments") or []
+        if attachments:
+            from core.attachments import relocate_attachment
+
+            attachments = [relocate_attachment(dict(a), session_id) for a in attachments]
+        self.gemma.store.add_message(
+            session_id,
+            "user",
+            message,
+            metadata={"attachments": attachments},
+        )
         context = str(body.get("context") or "").strip()
         with self.gemma._inflight_lock:
             self.gemma._chat_inflight += 1
