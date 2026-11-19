@@ -352,7 +352,12 @@ class NativeToolProvider:
     def _timings_to_usage(timings: dict[str, Any]) -> dict[str, int | float]:
         usage: dict[str, int | float] = {}
         if isinstance(timings.get("prompt_n"), int):
-            usage["prompt_tokens"] = timings["prompt_n"]
+            cached = timings.get("cache_n")
+            usage["prompt_tokens"] = timings["prompt_n"] + (
+                cached if isinstance(cached, int) else 0
+            )
+            usage["new_prompt_tokens"] = timings["prompt_n"]
+            usage["cache_tokens"] = cached if isinstance(cached, int) else 0
         if isinstance(timings.get("predicted_n"), int):
             usage["completion_tokens"] = timings["predicted_n"]
         if isinstance(timings.get("predicted_ms"), (int, float)):
