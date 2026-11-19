@@ -284,7 +284,7 @@ class GemmaWebServer:
         try:
             if provider is not None:
                 async for event in provider.stream(
-                    multimodal_messages(messages), [], max_tokens=1024
+                    multimodal_messages(messages), [], max_tokens=400
                 ):
                     if event.type == "text" and event.text:
                         if first_at is None:
