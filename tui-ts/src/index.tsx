@@ -56,7 +56,9 @@ async function main() {
 
   // Create the renderer first so the terminal palette can be read before the
   // first paint: `system` mode then starts on the right light/dark variant.
-  const renderer = await createCliRenderer({})
+  // Ctrl+C is handled by the app as "cancel the current turn"; OpenTUI's
+  // default exitOnCtrlC would terminate the process before our key handler.
+  const renderer = await createCliRenderer({ exitOnCtrlC: false })
   await initTheme(renderer, prefs.theme, prefs.themeMode)
 
   // Run the app. `render` returns once the renderer is attached; the app keeps
