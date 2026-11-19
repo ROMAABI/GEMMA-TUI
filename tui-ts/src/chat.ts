@@ -5,6 +5,8 @@ import {
   GemmaClient,
   PairingError,
   type AgentEvent,
+  type AttachmentCaps,
+  type AttachmentDescriptor,
   type CommandDef,
   type DoneStats,
   type ModelList,
@@ -50,6 +52,8 @@ export interface Message {
   toolMs?: number
   stopped?: boolean
   error?: string
+  /** Attachments sent with this user message. */
+  attachments?: AttachmentDescriptor[]
   /** Web-search state for this turn: status line while running, sources after. */
   search?: SearchState
 }
@@ -182,6 +186,9 @@ function fromServer(messages: ServerMessage[]): Message[] {
       content: item.content,
       parts,
       createdAt: item.created_at,
+      attachments: (item.metadata?.attachments as AttachmentDescriptor[] | undefined)?.length
+        ? (item.metadata?.attachments as AttachmentDescriptor[])
+        : undefined,
     })
   }
 
@@ -226,6 +233,8 @@ export function createChat(client: GemmaClient) {
   const [notice, setNoticeSignal] = createSignal<string | null>(null)
   // Web search defaults ON, like the classic TUI (websearch_enabled = True).
   const [websearch, setWebsearchSignal] = createSignal(true)
+  const [attachments, setAttachments] = createSignal<AttachmentDescriptor[]>([])
+  const [attachmentCaps, setAttachmentCaps] = createSignal<AttachmentCaps | null>(null)
   const [connected, setConnected] = createSignal<boolean | null>(null)
   const [permission, setPermission] = createSignal<AgentEvent | null>(null)
   const [runId, setRunId] = createSignal<string | null>(null)
@@ -289,6 +298,11 @@ export function createChat(client: GemmaClient) {
   async function load(): Promise<void> {
     const serverInfo = await client.info()
     setInfo(serverInfo)
+    try {
+      setAttachmentCaps(serverInfo.attachments ?? (await client.attachmentCapabilities()))
+    } catch {
+      setAttachmentCaps(null)
+    }
 
     const metas = await client.sessions()
     const details = await Promise.all(
@@ -639,7 +653,10 @@ export function createChat(client: GemmaClient) {
     if (!streamingFlag) void refreshTitles()
   }, 4000)
 
-  async function startTurn(raw: string): Promise<{
+  async function startTurn(
+    raw: string,
+    atts: AttachmentDescriptor[] = [],
+  ): Promise<{
     session: Session
     sessionId: string
     assistantId: string
@@ -673,6 +690,7 @@ export function createChat(client: GemmaClient) {
       content: text,
       parts: [{ kind: "text", text }],
       createdAt: now,
+      attachments: atts.length ? atts : undefined,
     }
     const assistantId = nextId("a")
     const assistantMessage: Message = {
@@ -828,8 +846,10 @@ export function createChat(client: GemmaClient) {
   }
 
   async function sendChat(raw: string): Promise<void> {
-    const turn = await startTurn(raw)
+    const atts = attachments()
+    const turn = await startTurn(raw, atts)
     if (!turn) return
+    clearAttachments()
     const { sessionId, assistantId, startedAt } = turn
     let firstAt: number | null = null
     let tokens = 0
@@ -873,6 +893,7 @@ export function createChat(client: GemmaClient) {
         },
         controller?.signal,
         context,
+        atts,
       )
 
       const finalStats = statsBox.value
@@ -897,8 +918,10 @@ export function createChat(client: GemmaClient) {
   }
 
   async function sendAgent(raw: string): Promise<void> {
-    const turn = await startTurn(raw)
+    const atts = attachments()
+    const turn = await startTurn(raw, atts)
     if (!turn) return
+    clearAttachments()
     const { sessionId, assistantId, startedAt } = turn
     let firstAt: number | null = null
     let tokens = 0
@@ -1064,6 +1087,7 @@ export function createChat(client: GemmaClient) {
         },
         controller?.signal,
         context,
+        atts,
       )
 
       const elapsed = (performance.now() - startedAt) / 1000
@@ -1098,6 +1122,69 @@ export function createChat(client: GemmaClient) {
       await reconcile(sessionId)
     } finally {
       finishTurn()
+    }
+  }
+
+  async function addAttachment(path: string): Promise<void> {
+    const caps = attachmentCaps()
+    if (attachments().length >= (caps?.max_attachments ?? 8)) {
+      setNotice("Maximum 8 attachments per message")
+      return
+    }
+    const maxBytes = caps?.max_file_bytes ?? 20 * 1024 * 1024
+    try {
+      const { statSync } = await import("node:fs")
+      if (statSync(path).size > maxBytes) {
+        setNotice(`File is over 20MB — ${path}`)
+        return
+      }
+    } catch {
+      // The server validates too; keep going for virtual paths.
+    }
+    try {
+      const result = await client.prepareAttachment(path, activeId() || "new")
+      if (!result.ok || !result.attachment) {
+        setNotice(result.error ?? "Could not attach file")
+        return
+      }
+      setAttachments((prev) => [...prev, result.attachment!])
+      setNotice(`Attached ${result.attachment.name}`)
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  function removeAttachment(id: string): void {
+    setAttachments((prev) => prev.filter((item) => item.id !== id))
+  }
+
+  function clearAttachments(): void {
+    setAttachments([])
+  }
+
+  async function pasteImage(): Promise<void> {
+    const { writeFileSync } = await import("node:fs")
+    const { tmpdir } = await import("node:os")
+    const { join } = await import("node:path")
+    const wayland = Boolean(process.env.WAYLAND_DISPLAY)
+    const command = wayland ? "wl-paste" : "xclip"
+    const args = wayland
+      ? ["--type", "image/png"]
+      : ["-selection", "clipboard", "-t", "image/png", "-o"]
+    try {
+      const proc = Bun.spawnSync([command, ...args], { stdout: "pipe", stderr: "pipe" })
+      if (proc.exitCode !== 0 || !proc.stdout.length) {
+        throw new Error(
+          wayland
+            ? "No image in clipboard (wl-paste)"
+            : "No image in clipboard (install xclip: sudo pacman -S xclip)",
+        )
+      }
+      const target = join(tmpdir(), `gemma-clipboard-${Date.now()}.png`)
+      writeFileSync(target, proc.stdout)
+      await addAttachment(target)
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error))
     }
   }
 
@@ -1225,6 +1312,12 @@ export function createChat(client: GemmaClient) {
     websearch,
     setWebsearch,
     toggleWebsearch,
+    attachments,
+    attachmentCaps,
+    addAttachment,
+    removeAttachment,
+    clearAttachments,
+    pasteImage,
     showThinking,
     toggleThinking: () => setShowThinking((value) => !value),
     connected,

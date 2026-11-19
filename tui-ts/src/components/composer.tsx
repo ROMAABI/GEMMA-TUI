@@ -1,7 +1,8 @@
 import { For, Show, createEffect, createMemo, createSignal, on } from "solid-js"
 import { useTerminalDimensions } from "@opentui/solid"
 import type { KeyEvent, TextareaRenderable } from "@opentui/core"
-import type { CommandDef } from "../api"
+import type { AttachmentDescriptor, CommandDef } from "../api"
+import { attachmentIcon, attachmentLabel, extractPaths } from "../attachments"
 import { colors, type ResolvedTheme } from "../theme"
 import { displayModelName, truncate } from "../format"
 
@@ -40,6 +41,12 @@ export function Composer(props: {
   onCommand: (name: string) => void
   onToggleMode: () => void
   onModel: () => void
+  attachments: AttachmentDescriptor[]
+  onAttach: (path: string) => void
+  onRemoveAttachment: (id: string) => void
+  onPicker: () => void
+  onPasteImage: () => void
+  suggestPaths: (query: string) => Promise<string[]>
 }) {
   const [value, setValue] = createSignal("")
   const [selected, setSelected] = createSignal(0)
@@ -58,6 +65,33 @@ export function Composer(props: {
   })
 
   const paletteOpen = createMemo(() => matches().length > 0 && !dismissed())
+
+  const [pathOptions, setPathOptions] = createSignal<string[]>([])
+  const [pathSelected, setPathSelected] = createSignal(0)
+  const attachQuery = createMemo(() => {
+    const match = /^\/attach\s+(.*)$/.exec(value())
+    return match ? match[1] ?? "" : null
+  })
+  const showPaths = createMemo(
+    () => attachQuery() !== null && pathOptions().length > 0 && !dismissed(),
+  )
+  createEffect(
+    on(attachQuery, (query) => {
+      if (query === null) {
+        if (pathOptions().length) setPathOptions([])
+        return
+      }
+      let live = true
+      void props.suggestPaths(query).then((paths) => {
+        if (!live) return
+        setPathOptions(paths.slice(0, 10))
+        setPathSelected(0)
+      })
+      return () => {
+        live = false
+      }
+    }),
+  )
 
   createEffect(
     on(
@@ -102,9 +136,23 @@ export function Composer(props: {
     if (match) setText(`${match.name} `)
   }
 
+  const detectAndAttach = (text: string) => {
+    const paths = extractPaths(text)
+    const targets = paths.length ? paths : [text.trim()].filter(Boolean)
+    if (!targets.length) return false
+    for (const path of targets) props.onAttach(path)
+    setText("")
+    setDismissed(false)
+    return true
+  }
+
   const submit = () => {
     const text = area?.plainText ?? value()
     if (!text.trim()) return
+    if (showPaths()) {
+      detectAndAttach(pathOptions()[pathSelected()] ?? attachQuery() ?? "")
+      return
+    }
     if (paletteOpen()) {
       const exact = commands().find((command) => command.name === text.trim())
       if (!exact) {
@@ -118,6 +166,34 @@ export function Composer(props: {
   }
 
   const onKeyDown = (event: KeyEvent) => {
+    if (event.ctrl && event.name === "v") {
+      event.preventDefault()
+      props.onPasteImage()
+      return
+    }
+    if (event.name === "backspace" && value() === "" && props.attachments.length) {
+      event.preventDefault()
+      props.onRemoveAttachment(props.attachments[props.attachments.length - 1]!.id)
+      return
+    }
+    if (showPaths()) {
+      if (event.name === "tab" || event.name === "return") {
+        event.preventDefault()
+        detectAndAttach(pathOptions()[pathSelected()] ?? attachQuery() ?? "")
+        return
+      }
+      if (event.name === "up" || event.name === "down") {
+        event.preventDefault()
+        const count = pathOptions().length
+        setPathSelected((prev) => (prev + (event.name === "down" ? 1 : count - 1)) % count)
+        return
+      }
+      if (event.name === "escape") {
+        event.preventDefault()
+        setDismissed(true)
+        return
+      }
+    }
     if (!paletteOpen()) {
       // Tab toggles chat/agent mode when the slash palette is closed.
       if (event.name === "tab") {
@@ -139,6 +215,11 @@ export function Composer(props: {
       event.preventDefault()
       setDismissed(true)
     }
+  }
+
+  const onPaste = (event: { bytes: Uint8Array; preventDefault: () => void }) => {
+    const text = new TextDecoder().decode(event.bytes)
+    if (detectAndAttach(text)) event.preventDefault()
   }
 
   const handleContentChange = (_event: unknown) => {
@@ -247,6 +328,7 @@ export function Composer(props: {
             { name: "kpenter", shift: true, action: "newline" },
           ]}
           onSubmit={submit}
+          onPaste={onPaste}
           onContentChange={handleContentChange}
           onKeyDown={onKeyDown}
         />
@@ -293,7 +375,8 @@ export function Composer(props: {
           <span style={{ fg: colors().faint }}> · </span>
         </Show>
         <span style={{ fg: colors().faint }}>ctrl+k models</span>
-        <Show when={props.width >= 60}>
+        <Show when={props.width >= 70}>
+          <span style={{ fg: colors().faint }}> · ctrl+o attach</span>
           <span style={{ fg: colors().faint }}> · ctrl+b sidebar</span>
         </Show>
       </text>
@@ -302,6 +385,34 @@ export function Composer(props: {
 
   return (
     <box flexDirection="column" flexShrink={0} alignItems="center">
+      <Show when={props.attachments.length > 0}>
+        <box flexDirection="column" width={props.width} backgroundColor={colors().card} paddingLeft={1} paddingRight={1} flexShrink={0}>
+          <For each={props.attachments}>
+            {(attachment) => (
+              <box flexDirection="row" height={1} gap={1}>
+                <text style={{ fg: props.accent.accent }}>{attachmentIcon(attachment.kind)}</text>
+                <text style={{ fg: colors().text }} flexGrow={1} truncate>
+                  {attachmentLabel(attachment)}
+                </text>
+                <text style={{ fg: colors().faint }} onMouseDown={() => props.onRemoveAttachment(attachment.id)}>
+                  ✕
+                </text>
+              </box>
+            )}
+          </For>
+        </box>
+      </Show>
+      <Show when={showPaths()}>
+        <box flexDirection="column" width={props.width} border borderStyle="rounded" borderColor={colors().border} backgroundColor={colors().panel} paddingLeft={1} flexShrink={0}>
+          <For each={pathOptions().slice(0, 8)}>
+            {(path, index) => (
+              <text height={1} truncate style={{ fg: index() === pathSelected() ? props.accent.accent : colors().dim }}>
+                {`${index() === pathSelected() ? "▸" : " "} ${path}`}
+              </text>
+            )}
+          </For>
+        </box>
+      </Show>
       <Show when={paletteOpen() && props.placement === "above"}>
         <Palette />
       </Show>

@@ -21,10 +21,12 @@ import {
   SettingsOverlay,
   PermissionOverlay,
   LogsOverlay,
+  FilePickerOverlay,
 } from "./components/overlays"
 
 type Overlay =
   | null
+  | { kind: "picker" }
   | { kind: "logs" }
   | { kind: "model" }
   | { kind: "theme" }
@@ -265,6 +267,12 @@ export function App(props: { chat: Chat }) {
       return
     }
 
+    if (ctrl && name === "o") {
+      key.preventDefault()
+      setOverlay({ kind: "picker" })
+      return
+    }
+
     if (ctrl && name === "b") {
       key.preventDefault()
       toggleSidebar()
@@ -363,6 +371,10 @@ export function App(props: { chat: Chat }) {
     const arg = rest.join(" ").trim()
 
     switch (name) {
+      case "/attach":
+        if (arg.trim()) void props.chat.addAttachment(arg.trim())
+        else setOverlay({ kind: "picker" })
+        return true
       case "/new":
         void props.chat.newChat()
         return true
@@ -751,6 +763,12 @@ export function App(props: { chat: Chat }) {
       onCommand={handleCommand}
       onToggleMode={() => props.chat.toggleMode()}
       onModel={openModelPicker}
+      attachments={props.chat.attachments()}
+      onAttach={(path) => void props.chat.addAttachment(path)}
+      onRemoveAttachment={(id) => props.chat.removeAttachment(id)}
+      onPicker={() => setOverlay({ kind: "picker" })}
+      onPasteImage={() => void props.chat.pasteImage()}
+      suggestPaths={(query) => props.chat.client.suggestPaths(query).then((data) => data.paths)}
       state={composerState}
     />
   )
@@ -860,6 +878,13 @@ export function App(props: { chat: Chat }) {
         </box>
       </box>
 
+      <Show when={overlay()?.kind === "picker"}>
+        <FilePickerOverlay
+          accent={accent()}
+          onPick={(path) => void props.chat.addAttachment(path)}
+          onClose={() => setOverlay(null)}
+        />
+      </Show>
       <Show when={overlay()?.kind === "logs"}>
         <LogsOverlay client={props.chat.client} accent={accent()} onClose={() => setOverlay(null)} />
       </Show>

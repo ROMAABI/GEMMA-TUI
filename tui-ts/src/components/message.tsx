@@ -1,5 +1,9 @@
 import { For, Match, Show, Switch, createMemo, createSignal } from "solid-js"
 import type { ColorInput } from "@opentui/core"
+import type { AttachmentDescriptor } from "../api"
+import {
+  attachmentIcon, attachmentLabel, chafaLines, kittySupported,
+} from "../attachments"
 import type { Message, Part } from "../chat"
 import { colors } from "../theme"
 import { clockTime, formatNumber, formatSeconds } from "../format"
@@ -127,6 +131,30 @@ function SourcesBlock(props: { sources?: Array<{ title: string; domain: string; 
           </text>
         )}
       </For>
+    </box>
+  )
+}
+
+/** Attachment chip with a small inline preview when the terminal can show one. */
+function AttachmentCard(props: { attachment: AttachmentDescriptor; accent: ColorInput }) {
+  const art = createMemo(() =>
+    props.attachment.preview && !kittySupported()
+      ? chafaLines(props.attachment.preview)
+      : [],
+  )
+  return (
+    <box flexDirection="column" flexShrink={0} marginTop={1} border={["left"]} borderColor={colors().border} paddingLeft={1}>
+      <text style={{ fg: props.accent }}>
+        {`${attachmentIcon(props.attachment.kind)} ${attachmentLabel(props.attachment)}`}
+      </text>
+      <Show when={kittySupported() && props.attachment.preview}>
+        <image source={props.attachment.preview!} width={16} height={8} fit="fit" />
+      </Show>
+      <Show when={art().length > 0}>
+        <For each={art()}>
+          {(line) => <text style={{ fg: colors().faint }}>{line}</text>}
+        </For>
+      </Show>
     </box>
   )
 }
@@ -287,6 +315,11 @@ export function MessageCard(props: {
             <text style={{ fg: colors().faint }}>{clockTime(props.message.createdAt)}</text>
           </box>
           <PlainView content={props.message.content} />
+          <For each={props.message.attachments ?? []}>
+            {(attachment) => (
+              <AttachmentCard attachment={attachment} accent={props.accent} />
+            )}
+          </For>
         </box>
       </Show>
     </box>

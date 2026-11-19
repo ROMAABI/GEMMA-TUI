@@ -1,3 +1,6 @@
+import { readdirSync } from "node:fs"
+import { basename, join, resolve } from "node:path"
+import { homedir } from "node:os"
 import { For, Match, Show, Switch, createMemo, createSignal, onMount } from "solid-js"
 import { useKeyboard, useTerminalDimensions } from "@opentui/solid"
 import type { InputRenderable } from "@opentui/core"
@@ -594,6 +597,89 @@ export function LogsOverlay(props: {
       </scrollbox>
       <text style={{ fg: colors().faint }} height={1}>
         Esc, Enter or q to close
+      </text>
+    </Frame>
+  )
+}
+
+/** Minimal local file picker: navigate dirs, filter by name, Enter to attach. */
+export function FilePickerOverlay(props: {
+  accent: ResolvedTheme
+  onPick: (path: string) => void
+  onClose: () => void
+}) {
+  const [dir, setDir] = createSignal(homedir())
+  const [filter, setFilter] = createSignal("")
+  const [selected, setSelected] = createSignal(0)
+  let input: InputRenderable | undefined
+  const entries = createMemo(() => {
+    try {
+      return readdirSync(dir(), { withFileTypes: true })
+        .filter((entry) => entry.name.toLowerCase().includes(filter().toLowerCase()))
+        .sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name))
+        .slice(0, 14)
+    } catch {
+      return []
+    }
+  })
+  const open = (path: string, isDir: boolean) => {
+    if (isDir) {
+      setDir(resolve(path))
+      setFilter("")
+      setSelected(0)
+    } else {
+      props.onPick(path)
+      props.onClose()
+    }
+  }
+  return (
+    <Frame title="Attach a file" accent={props.accent} width={74} height={22}>
+      <text style={{ fg: colors().faint }} height={1} truncate>
+        {dir()}
+      </text>
+      <box border borderColor={colors().border} height={3} flexShrink={0}>
+        <input
+          ref={input}
+          focused
+          placeholder="Filter by name…"
+          textColor={colors().text}
+          placeholderColor={colors().faint}
+          onContentChange={() => {
+            setFilter(input?.value ?? "")
+            setSelected(0)
+          }}
+          onKeyDown={(key: { name: string; preventDefault: () => void }) => {
+            if (key.name === "escape") {
+              key.preventDefault()
+              props.onClose()
+            } else if (key.name === "up" || key.name === "down") {
+              key.preventDefault()
+              const count = entries().length
+              if (count) setSelected((prev) => (prev + (key.name === "down" ? 1 : count - 1)) % count)
+            } else if (key.name === "return" || key.name === "tab") {
+              key.preventDefault()
+              const entry = entries()[selected()]
+              if (entry) open(join(dir(), entry.name), entry.isDirectory())
+            }
+          }}
+        />
+      </box>
+      <box flexDirection="column" flexGrow={1} minHeight={0}>
+        <For each={entries()}>
+          {(entry, index) => (
+            <text
+              height={1}
+              truncate
+              style={{ fg: index() === selected() ? props.accent.accent : colors().dim }}
+              onMouseDown={() => open(join(dir(), entry.name), entry.isDirectory())}
+            >
+              {`${entry.isDirectory() ? "▸ " : "  "}${entry.name}`}
+            </text>
+          )}
+        </For>
+      </box>
+      <text style={{ fg: colors().faint }} height={1}>
+        ↑↓ navigate · Enter open/attach · Esc close
       </text>
     </Frame>
   )

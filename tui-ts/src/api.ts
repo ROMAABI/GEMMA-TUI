@@ -5,6 +5,31 @@
  * with a one-time link, then talks JSON + SSE over the authenticated origin.
  */
 
+export interface AttachmentDescriptor {
+  id: string
+  name: string
+  kind: "image" | "video" | "text" | "pdf"
+  size: number
+  mime?: string
+  stored_path: string
+  preview?: string | null
+  text?: string
+  duration?: number
+  frames?: number
+  note?: string
+  audio_skipped?: boolean
+  tokens_est?: number
+}
+
+export interface AttachmentCaps {
+  vision: boolean
+  ffmpeg: boolean
+  chafa: boolean
+  pdftotext: boolean
+  max_attachments: number
+  max_file_bytes: number
+}
+
 export interface ServerInfo {
   app: string
   version: string
@@ -18,6 +43,8 @@ export interface ServerInfo {
   temperature: number
   context_max: number
   max_steps?: number
+  vision?: boolean
+  attachments?: AttachmentCaps
 }
 
 export interface SessionMeta {
@@ -236,6 +263,33 @@ export class GemmaClient {
     return (await response.json()) as T
   }
 
+  /** Capabilities of the attachment pipeline. */
+  attachmentCapabilities(): Promise<AttachmentCaps> {
+    return this.json("/api/attachments/capabilities")
+  }
+
+  /** Ask the server to resize/extract one local file into a stored descriptor. */
+  async prepareAttachment(
+    path: string,
+    sessionId: string,
+  ): Promise<{ ok: boolean; attachment?: AttachmentDescriptor; error?: string }> {
+    const response = await fetch(`${this.base}/api/attachments/prepare`, {
+      method: "POST",
+      headers: this.headers(),
+      body: JSON.stringify({ path, session_id: sessionId }),
+    })
+    return (await response.json()) as {
+      ok: boolean
+      attachment?: AttachmentDescriptor
+      error?: string
+    }
+  }
+
+  /** Path completions for /attach <prefix>. */
+  suggestPaths(query: string): Promise<{ paths: string[] }> {
+    return this.json(`/api/attachments/suggest?q=${encodeURIComponent(query)}`)
+  }
+
   info(): Promise<ServerInfo> {
     return this.json<ServerInfo>("/api/info")
   }
@@ -442,13 +496,15 @@ export class GemmaClient {
     },
     signal?: AbortSignal,
     context?: string,
+    attachments?: AttachmentDescriptor[],
   ): Promise<void> {
+    const body: Record<string, unknown> = { session_id: sessionId, message }
+    if (context) body.context = context
+    if (attachments?.length) body.attachments = attachments
     const response = await fetch(`${this.base}/api/chat`, {
       method: "POST",
       headers: this.headers({ Accept: "text/event-stream" }),
-      body: JSON.stringify(
-        context ? { session_id: sessionId, message, context } : { session_id: sessionId, message },
-      ),
+      body: JSON.stringify(body),
       signal,
     })
     if (response.status === 401) throw new PairingError("Pairing required.")
@@ -496,11 +552,15 @@ export class GemmaClient {
     },
     signal?: AbortSignal,
     context?: string,
+    attachments?: AttachmentDescriptor[],
   ): Promise<void> {
+    const body: Record<string, unknown> = { session_id: sessionId, message }
+    if (context) body.context = context
+    if (attachments?.length) body.attachments = attachments
     const response = await fetch(`${this.base}/api/agent`, {
       method: "POST",
       headers: this.headers({ Accept: "text/event-stream" }),
-      body: JSON.stringify(context ? { session_id: sessionId, message, context } : { session_id: sessionId, message }),
+      body: JSON.stringify(body),
       signal,
     })
     if (response.status === 401) throw new PairingError("Pairing required.")
