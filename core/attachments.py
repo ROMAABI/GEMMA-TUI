@@ -14,9 +14,12 @@ import mimetypes
 import re
 import shutil
 import subprocess
+import time
 import uuid
 from pathlib import Path
 from typing import Any
+
+from utils import runlog
 
 MAX_ATTACHMENTS = 8
 MAX_FILE_BYTES = 20 * 1024 * 1024
@@ -65,6 +68,22 @@ def suggest_paths(query: str, limit: int = 20) -> list[str]:
         if len(out) >= limit:
             break
     return out
+
+
+def payload_bytes(attachments: list[dict[str, Any]]) -> int:
+    """Approximate JSON request size for a list of prepared attachments."""
+    total = 0
+    for attachment in attachments:
+        total += len(str(attachment.get("text") or ""))
+        for key in ("stored_path", "preview"):
+            path = Path(str(attachment.get(key) or ""))
+            if path.is_file():
+                total += int(path.stat().st_size * 4 / 3)
+        stored = Path(str(attachment.get("stored_path") or ""))
+        if stored.is_file():
+            for frame in stored.parent.glob(f"{stored.stem}_frame*.jpg"):
+                total += int(frame.stat().st_size * 4 / 3)
+    return total
 
 
 def vision_supported(base_url: str) -> bool:
@@ -208,6 +227,7 @@ def _extract_text(path: Path, kind: str) -> str:
 
 def prepare_attachment(session_id: str, raw_path: str) -> dict[str, Any]:
     """Validate, store and preprocess one file; returns a DB-safe descriptor."""
+    started = time.monotonic()
     path = Path(raw_path).expanduser()
     if not path.is_file():
         raise AttachmentError(f"File not found: {raw_path}")
@@ -268,6 +288,18 @@ def prepare_attachment(session_id: str, raw_path: str) -> dict[str, Any]:
     # Data URIs are regenerated from stored_path when building model messages.
     descriptor.pop("image_data", None)
     descriptor.pop("image_data_list", None)
+    runlog.log(
+        {
+            "type": "attachment_prepared",
+            "session_id": session_id,
+            "name": descriptor["name"],
+            "kind": kind,
+            "size": size,
+            "frames": descriptor.get("frames", 0),
+            "tokens_est": descriptor["tokens_est"],
+            "ms": round((time.monotonic() - started) * 1000, 1),
+        }
+    )
     return descriptor
 
 

@@ -33,6 +33,7 @@ from core.agent_service import AgentRuntime
 from core.attachments import recent_attachment_messages
 from core.client import LlamaClient
 from sessions.store import SessionStore
+from utils import runlog
 from utils.paths import server_log_path
 
 DEFAULT_PORT = 47317
@@ -239,6 +240,23 @@ class GemmaWebServer:
             messages.append({"role": "system", "content": extra})
         messages.extend(history)
         return messages
+
+    @staticmethod
+    def _log_attachments(session_id: str, attachments: list[dict[str, Any]]) -> None:
+        if not attachments:
+            return
+        from core.attachments import payload_bytes
+
+        runlog.log(
+            {
+                "type": "attachment_request",
+                "session_id": session_id,
+                "count": len(attachments),
+                "kinds": [item.get("kind") for item in attachments],
+                "payload_bytes": payload_bytes(attachments),
+                "tokens_est": sum(int(item.get("tokens_est") or 0) for item in attachments),
+            }
+        )
 
     def queue_title(self, session_id: str, reply: str) -> None:
         """Kick off a background title after an assistant reply is stored."""
@@ -666,6 +684,7 @@ class _Handler(BaseHTTPRequestHandler):
                 from core.attachments import relocate_attachment
 
                 attachments = [relocate_attachment(dict(a), session_id) for a in attachments]
+                self.gemma._log_attachments(session_id, attachments)
             run = self.gemma.agent.start(session_id, message, context=context, attachments=attachments)
             self.emit({"type": "run", "run_id": run.run_id, "session_id": session_id})
             self._drain(run)
@@ -1245,6 +1264,7 @@ class _Handler(BaseHTTPRequestHandler):
             from core.attachments import relocate_attachment
 
             attachments = [relocate_attachment(dict(a), session_id) for a in attachments]
+        self.gemma._log_attachments(session_id, attachments)
         self.gemma.store.add_message(
             session_id,
             "user",
