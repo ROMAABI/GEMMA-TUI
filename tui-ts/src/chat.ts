@@ -42,6 +42,8 @@ export interface Message {
   ttft?: number
   /** Generation tokens reported by the provider, when available. */
   tokens?: number
+  /** Real prompt token count from llama.cpp for the completed turn. */
+  promptTokens?: number
   /** Real generation time reported by the provider, for a consistent tok/s. */
   genMs?: number
   /** Total tool execution time in this turn. */
@@ -603,14 +605,22 @@ export function createChat(client: GemmaClient) {
           .filter((message) => typeof message.elapsed === "number")
           .map((message) => [`${message.role}:${message.content}`, message]),
       )
-      for (const message of canonical) {
-        const prior = stats.get(`${message.role}:${message.content}`)
+      for (const [index, message] of canonical.entries()) {
+        const byContent = stats.get(`${message.role}:${message.content}`)
+        const byPosition = local.messages[index]
+        const prior =
+          byContent ??
+          (byPosition?.role === message.role && typeof byPosition.elapsed === "number"
+            ? byPosition
+            : undefined)
         if (prior) {
           message.elapsed = prior.elapsed
           message.ttft = prior.ttft
           message.tokens = prior.tokens
           message.genMs = prior.genMs
           message.toolMs = prior.toolMs
+          message.promptTokens = prior.promptTokens
+          message.search = prior.search
         }
       }
       patchSession(sessionId, (current) => ({
@@ -710,6 +720,7 @@ export function createChat(client: GemmaClient) {
         ...message,
         content: content || "_Generation stopped._",
         stopped: true,
+        elapsed: message.elapsed ?? 0,
       }))
       return
     }
@@ -718,6 +729,7 @@ export function createChat(client: GemmaClient) {
         ...message,
         content: content || "**Pairing required.** Restart `gemma` to mint a fresh pairing link.",
         error: "pairing required",
+        elapsed: message.elapsed ?? 0,
       }))
       return
     }
@@ -726,6 +738,7 @@ export function createChat(client: GemmaClient) {
       ...current,
       content: current.content,
       error: text,
+      elapsed: current.elapsed ?? 0,
     }))
   }
 
@@ -805,6 +818,7 @@ export function createChat(client: GemmaClient) {
         status: "failed",
         query: label,
         error: read.error ?? "no page text could be fetched",
+        sources,
       })
       return { memoryFallback: true }
     } catch (error) {
@@ -889,6 +903,7 @@ export function createChat(client: GemmaClient) {
     let firstAt: number | null = null
     let tokens = 0
     let genMs = 0
+    let promptTokens = 0
     let stopped = false
     let failure: string | null = null
     let currentRun = ""
@@ -1011,6 +1026,8 @@ export function createChat(client: GemmaClient) {
                 if (output > 0) tokens = Math.max(tokens, output)
                 const eventGenMs = Number(info.gen_ms ?? 0)
                 if (eventGenMs > 0) genMs = eventGenMs
+                const eventPrompt = Number(info.prompt_tokens ?? 0)
+                if (eventPrompt > 0) promptTokens = eventPrompt
                 setLive({
                   tokens,
                   elapsed: (performance.now() - startedAt) / 1000,
@@ -1064,6 +1081,7 @@ export function createChat(client: GemmaClient) {
           ttft: firstAt ? (firstAt - startedAt) / 1000 : elapsed,
           tokens: tokens || undefined,
           genMs: genMs || undefined,
+          promptTokens: promptTokens || undefined,
           toolMs: toolMs || undefined,
           stopped: stopped || message.stopped,
           error: failure ?? message.error,
@@ -1111,10 +1129,11 @@ export function createChat(client: GemmaClient) {
   const metrics = createMemo<Metrics>(() => {
     const session = activeSession()
     const serverInfo = info()
-    const contextUsed = (session?.messages ?? []).reduce(
+    const estimatedContext = (session?.messages ?? []).reduce(
       (sum, message) => sum + estimateTokens(message.content),
       0,
     )
+    let contextUsed = estimatedContext
     const contextMax = serverInfo?.context_max ?? 32768
     const provider = serverInfo?.provider ?? "llama.cpp"
     const temperature = serverInfo?.temperature ?? 0.7
@@ -1154,6 +1173,7 @@ export function createChat(client: GemmaClient) {
       }
     }
     const elapsed = lastAssistant.elapsed ?? 0
+    if (lastAssistant.promptTokens) contextUsed = lastAssistant.promptTokens
     const genSeconds = (lastAssistant.genMs ?? 0) / 1000
     const tokens = lastAssistant.tokens ?? estimateTokens(lastAssistant.content)
     return {

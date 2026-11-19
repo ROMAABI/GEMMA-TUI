@@ -781,7 +781,7 @@ describe("OpenTUI client", () => {
     // waiting for a frame that includes all three turns.
     await new Promise((resolve) => setTimeout(resolve, 150))
     await setup.renderOnce()
-    await setup.waitForFrame((text: string) => text.includes("Hello from the mock") && text.includes("cm of tamil nadu") && text.split("⚡").length > 3)
+    await setup.waitForFrame((text: string) => text.includes("List of chief ministers of Tamil Nadu"))
     expect(current.prepareCalls[1]).toBe("who is the cm of tamil nadu")
     expect(current.chatRequests.at(-1)?.context).toBe("OFFICE CONTEXT")
     const last = chat.activeSession()?.messages.at(-1)

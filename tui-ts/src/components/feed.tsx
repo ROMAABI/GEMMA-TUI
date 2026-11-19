@@ -2,6 +2,7 @@ import { For, createEffect, createMemo, on } from "solid-js"
 import type { ScrollBoxRenderable } from "@opentui/core"
 import type { ColorInput } from "@opentui/core"
 import type { Chat } from "../chat"
+import { LAYOUT } from "../layout"
 import { colors } from "../theme"
 import { MessageCard } from "./message"
 
@@ -38,7 +39,7 @@ export function Feed(props: { chat: Chat; accent: ColorInput; onCopy: (text: str
         stickyStart="bottom"
         verticalScrollbarOptions={{ visible: true }}
       >
-        <box flexDirection="column" paddingLeft={1} paddingRight={1} paddingTop={1}>
+        <box flexDirection="column" paddingLeft={1} paddingRight={1} paddingTop={1} paddingBottom={LAYOUT.composer.reserveRows}>
           <For each={messages()}>
             {(message) => (
               <MessageCard

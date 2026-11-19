@@ -112,6 +112,25 @@ function ReasoningBlock(props: { text: string; streaming: boolean; expandAll: bo
   )
 }
 
+function SourcesBlock(props: { sources?: Array<{ title: string; domain: string; date?: string }> }) {
+  return (
+    <box flexDirection="column" flexShrink={0} marginTop={1} border={["left"]} borderColor={colors().border} paddingLeft={1}>
+      <text style={{ fg: colors().faint }} height={1}>
+        {`sources · ${props.sources?.length ?? 0}`}
+      </text>
+      <For each={props.sources ?? []}>
+        {(source, index) => (
+          <text style={{ fg: colors().muted }} wrapMode="word">
+            {`${index() + 1}. ${source.title || source.domain} — ${source.domain}${
+              source.date ? ` · ${source.date}` : ""
+            }`}
+          </text>
+        )}
+      </For>
+    </box>
+  )
+}
+
 /** Web-search status for the turn: running line, failure line, or sources. */
 function SearchBlock(props: { search: NonNullable<Message["search"]>; accent: ColorInput }) {
   return (
@@ -139,22 +158,10 @@ function SearchBlock(props: { search: NonNullable<Message["search"]>; accent: Co
             {`Web search failed: ${props.search.error ?? "unavailable"} — answering from model memory`}
           </text>
         </box>
+        <SourcesBlock sources={props.search.sources} />
       </Match>
       <Match when={props.search.status === "ok"}>
-        <box flexDirection="column" flexShrink={0} marginTop={1} border={["left"]} borderColor={colors().border} paddingLeft={1}>
-          <text style={{ fg: colors().faint }} height={1}>
-            {`sources · ${props.search.sources?.length ?? 0}`}
-          </text>
-          <For each={props.search.sources ?? []}>
-            {(source, index) => (
-              <text style={{ fg: colors().muted }} wrapMode="word">
-                {`${index() + 1}. ${source.title || source.domain} — ${source.domain}${
-                  source.date ? ` · ${source.date}` : ""
-                }`}
-              </text>
-            )}
-          </For>
-        </box>
+        <SourcesBlock sources={props.search.sources} />
       </Match>
     </Switch>
   )
@@ -232,7 +239,7 @@ export function MessageCard(props: {
             </Show>
 
             <box flexDirection="row" height={1} gap={1} marginTop={1}>
-              <Show when={typeof props.message.elapsed === "number" && !props.streaming}>
+              <Show when={typeof props.message.elapsed === "number" && (!props.streaming || props.message.error || props.message.stopped)}>
                 {(() => {
                   const genSeconds = (props.message.genMs ?? 0) / 1000
                   const tokens = props.message.tokens ?? props.message.content.length / 4

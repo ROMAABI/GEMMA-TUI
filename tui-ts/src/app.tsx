@@ -844,6 +844,7 @@ export function App(props: { chat: Chat }) {
                   onCopy={copyText}
                 />
                 <ComposerBlock placement="above" />
+                <box height={1} flexShrink={0} />
                 <StatusBar metrics={metrics()} width={contentWidth()} version={info()?.version} sessionsHint={!sidebar()} />
               </box>
             }
@@ -852,6 +853,7 @@ export function App(props: { chat: Chat }) {
               <Landing>
                 <ComposerBlock placement="below" />
               </Landing>
+              <box height={1} flexShrink={0} />
               <StatusBar metrics={metrics()} width={contentWidth()} version={info()?.version} sessionsHint={!sidebar()} />
             </box>
           </Show>

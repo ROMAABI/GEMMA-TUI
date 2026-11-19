@@ -22,6 +22,10 @@ export const LAYOUT = {
     chromeRows: 13,
     minListRows: 3,
   },
+  /** Pill (3 rows) + hint row and its margin: scroll content clears the composer. */
+  composer: {
+    reserveRows: 5,
+  },
 } as const
 
 /** Sidebar width for the given terminal width — the one sizing constant. */
