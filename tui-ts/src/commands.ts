@@ -3,6 +3,7 @@ import type { CommandDef } from "./api"
 /** Commands this terminal client implements. */
 export const TUI_COMMANDS: CommandDef[] = [
   { name: "/new", description: "Start a new session" },
+  { name: "/stop", description: "Cancel the running agent turn" },
   { name: "/attach", description: "Attach an image, video, PDF or text file" },
   { name: "/clear", description: "Clear this session" },
   { name: "/model", description: "Pick a provider model" },

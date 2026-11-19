@@ -183,6 +183,12 @@ export function App(props: { chat: Chat }) {
 
   const runLeader = (name: string) => {
     switch (name) {
+      case "s":
+        if (streaming()) {
+          props.chat.stop()
+          flash("Stopping…")
+        } else flash("Nothing is running")
+        break
       case "n":
         void props.chat.newChat()
         break
@@ -262,8 +268,14 @@ export function App(props: { chat: Chat }) {
 
     if (ctrl && name === "c") {
       key.preventDefault()
-      if (streaming()) props.chat.stop()
-      else flash("Ctrl+D or Ctrl+Q quits")
+      if (streaming()) {
+        try {
+          props.chat.stop()
+          flash("Stopping…")
+        } catch {
+          flash("Could not stop the run — try /stop")
+        }
+      } else flash("Ctrl+D or Ctrl+Q quits")
       return
     }
 
@@ -374,6 +386,12 @@ export function App(props: { chat: Chat }) {
       case "/attach":
         if (arg.trim()) void props.chat.addAttachment(arg.trim())
         else setOverlay({ kind: "picker" })
+        return true
+      case "/stop":
+        if (streaming()) {
+          props.chat.stop()
+          flash("Stopping…")
+        } else flash("Nothing is running")
         return true
       case "/new":
         void props.chat.newChat()
@@ -847,7 +865,7 @@ export function App(props: { chat: Chat }) {
             <box flexShrink={0} paddingLeft={2} paddingRight={2} height={1}>
               <text style={{ fg: accent().accent }}>
                 <b>ctrl+x</b>
-                <span style={{ fg: colors().faint }}> n new · l logs · v thinking · m models · t theme · a mode · h help · q quit</span>
+                <span style={{ fg: colors().faint }}> n new · s stop · l logs · v thinking · m models · t theme · a mode · h help · q quit</span>
               </text>
             </box>
           </Show>

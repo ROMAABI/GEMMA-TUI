@@ -246,6 +246,7 @@ export function createChat(client: GemmaClient) {
 
   let controller: AbortController | null = null
   let streamingFlag = false
+  let userStopped = false
   let noticeTimer: ReturnType<typeof setTimeout> | undefined
 
   /** Post a transient message; it clears itself so repeats are visible again. */
@@ -710,6 +711,7 @@ export function createChat(client: GemmaClient) {
 
     controller = new AbortController()
     streamingFlag = true
+    userStopped = false
     setStreaming(true)
     setStreamingId(assistantId)
     setLive({ tokens: 0, elapsed: 0, ttft: 0 })
@@ -732,7 +734,7 @@ export function createChat(client: GemmaClient) {
     content: string,
     stopped: boolean,
   ): void {
-    const aborted = stopped || (error instanceof DOMException && error.name === "AbortError")
+    const aborted = stopped || wasStopped(error)
     if (aborted) {
       patchMessage(sessionId, assistantId, (message) => ({
         ...message,
@@ -1116,7 +1118,7 @@ export function createChat(client: GemmaClient) {
       await reconcile(sessionId)
       void refreshTitles()
     } catch (error) {
-      const aborted = stopped || (error instanceof DOMException && error.name === "AbortError")
+      const aborted = stopped || wasStopped(error)
       applyFailure(sessionId, assistantId, error, "", aborted)
       finishTurn()
       await reconcile(sessionId)
@@ -1193,13 +1195,26 @@ export function createChat(client: GemmaClient) {
   }
 
   function stop(): void {
+    userStopped = true
     const current = runId()
     if (current) {
-      void client.abortRun(current).catch(() => {
-        // The run may already have finished.
-      })
+      try {
+        void Promise.resolve(client.abortRun(current)).catch(() => {
+          // The run may already have finished.
+        })
+      } catch {
+        // Cancellation must never throw into the key handler.
+      }
     }
-    controller?.abort()
+    try {
+      controller?.abort()
+    } catch {
+      // Same: an already-aborted controller is not an error.
+    }
+  }
+
+  function wasStopped(error: unknown): boolean {
+    return userStopped || (error instanceof DOMException && error.name === "AbortError")
   }
 
   async function respondPermission(decision: "allow" | "always" | "deny"): Promise<void> {
