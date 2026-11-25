@@ -167,6 +167,8 @@ llama-server -m models/gemma-3-4b-it-Q4_K_M.gguf \
 curl http://127.0.0.1:8080/health  # should return 200
 ```
 
+The `gemma-llama-server` user service picks automatically: **`Qwen3.5-4B_Abliterated.Q4_K_M`** while the laptop is on battery, **`Qwen3.5-9B-abliterated.Q4_K_M`** when plugged in. A 30-second user timer (`gemma-power-model.timer`) restarts the server when the power source changes. Force a choice with `GEMMA_FORCE_MODEL=small` or `=large` for the service environment.
+
 ### (Optional) Private web search with SearXNG
 
 Without this, GEMMA still falls back to public SearXNG / Wikipedia / DuckDuckGo. With it, queries never leave your LAN.

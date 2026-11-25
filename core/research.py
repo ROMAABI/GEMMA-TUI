@@ -34,7 +34,7 @@ _EXCERPT_CHARS = 400
 # Context sent to the model: ~250 tokens (≈4 chars/token). The local
 # llama-server prefills at ~20 tok/s, so context size is the whole turn's
 # latency budget; the cap stays well under the ~2000-token ceiling.
-_CONTEXT_CHAR_BUDGET = 1000
+_CONTEXT_CHAR_BUDGET = 1800
 # Search reliability: each SearXNG request gets its own 12s budget, one retry,
 # then a different engine set / instance is tried.
 _SEARCH_TIMEOUT = 12.0
@@ -742,18 +742,36 @@ def _is_fresh_query(query: str) -> bool:
     return bool(_FRESH_RE.search(query))
 
 
+_AUTHORITATIVE_DOMAINS = (
+    ".gov.in", ".nic.in", ".gov.", "britannica.com", "reuters.com",
+    "apnews.com", "bbc.com", "thehindu.com", "indianexpress.com",
+    "hindustantimes.com", "ndtv.com",
+)
+_LOW_TRUST_DOMAINS = (
+    "facebook.com", "instagram.com", "x.com", "twitter.com", "quora.com",
+    "reddit.com", "pinterest.com", "tiktok.com", "youtube.com", "youtu.be",
+)
+
+
 def _rank_results(results: list[dict[str, str]]) -> list[dict[str, str]]:
-    """Prefer recent, official sources; push Wikipedia down for fresh questions."""
-    def key(result: dict[str, str]) -> tuple[int, int, int]:
+    """Prefer official/reference sources; push social and fan pages to the end."""
+    def key(result: dict[str, str]) -> tuple[int, int, int, int]:
         url = result.get("url", "")
-        is_wiki = "wikipedia.org" in url
+        domain = urlparse(url).netloc.lower()
+        trusted = any(domain.endswith(item) or item in domain for item in _AUTHORITATIVE_DOMAINS)
+        low_trust = any(item in domain for item in _LOW_TRUST_DOMAINS)
         date = (result.get("date") or "")[:4]
         try:
             year = -int(date)
         except ValueError:
             year = 0
         has_date = 0 if (result.get("date") or "") else 1
-        return (1 if is_wiki else 0, year, has_date)
+        return (
+            2 if low_trust else (0 if trusted else 1),
+            1 if "wikipedia.org" in domain else 0,
+            year,
+            has_date,
+        )
 
     return sorted(results, key=key)
 
@@ -843,7 +861,7 @@ async def web_search(
         filtered = filtered[:top_n]
         if filtered:
             filtered = await _enrich(filtered, client, ua, deep_read=deep_read)
-            filtered = relevant_results(filtered, query, intent)[:top_n]
+            filtered = _rank_results(relevant_results(filtered, query, intent))[:top_n]
 
     runlog.log(
         {
@@ -863,19 +881,42 @@ async def web_search(
     return filtered
 
 
+_PROMO_LINE_RE = re.compile(
+    r"^\s*(buy:|subscribe|log ?in|sign up|advertisement|download the app|"
+    r"explore premium|unlock these|you are logged in)",
+    re.IGNORECASE,
+)
+
+
+def _clean_snippet(text: str) -> str:
+    """Drop search-result chrome that the model tends to copy into answers."""
+    return "\n".join(
+        line for line in (text or "").splitlines() if not _PROMO_LINE_RE.match(line)
+    ).strip()
+
+
 def format_context(results: list[dict[str, str]]) -> str:
     if not results:
         return "Web search returned no results."
     today = datetime.now().strftime("%B %d, %Y")
-    lines = [f"### Web search results (fetched {today})", ""]
+    lines = [
+        f"### Web search results (fetched {today})",
+        "Answer using these sources only. Prefer official government sites and "
+        "established reference/news sources; ignore social media, fan pages, "
+        "Quora, ads and promotional snippets. Never output 'Buy:' lines, ads "
+        "or links unless the user asked where to buy something. If sources "
+        "disagree, say so and name the disagreement. Be brief and name the "
+        "source you relied on.",
+        "",
+    ]
 
     # Keep the whole context under ~2000 tokens so generation stays fast.
     budget = _CONTEXT_CHAR_BUDGET
     for index, result in enumerate(results, 1):
         title = (result.get("title") or "").strip()
         date = (result.get("date") or "").strip()
-        snippet = (result.get("snippet") or "").strip()
-        excerpt = (result.get("excerpt") or "").strip()
+        snippet = _clean_snippet(result.get("snippet") or "")
+        excerpt = _clean_snippet(result.get("excerpt") or "")
         url = (result.get("url") or "").strip()
 
         block_lines = [f"{index}. {title}"]

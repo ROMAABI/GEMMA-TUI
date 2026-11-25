@@ -879,7 +879,7 @@ export function createChat(client: GemmaClient) {
     // as the classic TUI) and fetches SearXNG context, which rides into the
     // request as a system message. Sources show under the answer.
     let context: string | undefined
-    if (websearch()) {
+    if (websearch() && !SMALLTALK_RE.test(raw.trim())) {
       const prep = await prepareSearch(sessionId, assistantId, raw.trim())
       context = prep.context
       memoryFallback = prep.memoryFallback === true
@@ -953,7 +953,7 @@ export function createChat(client: GemmaClient) {
     // Web research rides into the agent run as extra system context, so tool
     // work still happens but facts come from the fresh results.
     let context: string | undefined
-    if (websearch()) {
+    if (websearch() && !SMALLTALK_RE.test(raw.trim())) {
       const prep = await prepareSearch(sessionId, assistantId, raw.trim())
       context = prep.context
       memoryFallback = prep.memoryFallback === true
@@ -1299,7 +1299,9 @@ export function createChat(client: GemmaClient) {
       queueMessage(text)
       return Promise.resolve()
     }
-    return mode() === "agent" ? sendAgent(text) : sendChat(text)
+    // A greeting does not need the agent loop: it would burn minutes on a
+    // CPU-only 9B model before producing a visible token.
+    return mode() === "agent" && !SMALLTALK_RE.test(text) ? sendAgent(text) : sendChat(text)
   }
 
   function wasStopped(error: unknown): boolean {

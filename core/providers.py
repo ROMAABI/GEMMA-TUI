@@ -12,7 +12,7 @@ from typing import Any, AsyncIterator
 import httpx
 
 from config.settings import Settings
-from core.client import LlamaClient
+from core.client import LlamaClient, collapse_system_messages
 from core.tools import parse_tool_calls, strip_tool_calls
 from utils import runlog
 
@@ -162,7 +162,7 @@ class NativeToolProvider:
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self.settings.model,
-            "messages": messages,
+            "messages": collapse_system_messages(messages),
             "stream": stream,
             "temperature": self.settings.temperature if temperature is None else temperature,
             "max_tokens": max_tokens or getattr(self.settings, "agent_max_tokens", 4096),
@@ -173,14 +173,11 @@ class NativeToolProvider:
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
-        # Web-search context makes the model run a long thinking process
-        # before the first visible token; on the local llama-server that
-        # costs minutes. Ask it to skip reasoning for those turns.
-        if any(
-            "### Web search results" in str(message.get("content") or "")
-            for message in messages
-        ):
-            payload["reasoning_budget"] = 0
+        # Qwen3.5 thinks for minutes on CPU before emitting anything. The chat
+        # template flag disables that thinking channel while still producing a
+        # normal answer (and tool calls) in the content channel.
+        if "qwen3" in (self.settings.model or "").lower():
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
         return payload
 
     async def warmup(

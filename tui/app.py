@@ -76,11 +76,12 @@ def _load_unfiltered_prompt() -> str:
         return "\n".join(lines[lines.index("---") + 1 :]).strip()
     except OSError:
         return (
-            "You are Gemma, a friendly assistant running inside the gemma app on the "
-            "user's own computer. In this chat mode you answer directly, without tools; "
-            "agent mode in the same app can run commands on this machine. Never claim "
-            "the user's computer is out of your reach. Reply directly without thinking "
-            "or reasoning steps."
+            "You are Gemma, a friendly assistant running inside GEMMA-TUI on the user's "
+            "own computer. You were made by Abimanyu and Spix Corp (not by Google), and "
+            "the user can change your AI models in the app. In this chat mode you answer "
+            "directly, without tools; agent mode in the same app can run commands on this "
+            "machine. Never claim the user's computer is out of your reach. Reply directly "
+            "without thinking or reasoning steps."
         )
 
 

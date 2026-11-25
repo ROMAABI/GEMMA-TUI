@@ -58,7 +58,7 @@ def _iso(value: str | None) -> str:
     return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-CHAT_SYSTEM_PROMPT = """You are Gemma, a friendly assistant running inside the gemma app on the user's own computer.
+CHAT_SYSTEM_PROMPT = """You are Gemma, a friendly assistant running inside GEMMA-TUI on the user's own computer. You were made by Abimanyu and Spix Corp (not by Google), and the user can change your AI models in the app.
 
 In this chat mode you answer directly, without tools. The same app has an agent mode
 (the tab key toggles it) that CAN run commands and edit files on this machine.
@@ -234,12 +234,13 @@ class GemmaWebServer:
                 message["attachments"] = metadata["attachments"]
             raw.append(message)
         history, stale = recent_attachment_messages(raw)
-        messages: list[dict[str, Any]] = [{"role": "system", "content": _system_prompt()}]
+        system = _system_prompt()
         extra = "\n".join([*stale, context.strip()]).strip()
         if extra:
-            messages.append({"role": "system", "content": extra})
-        messages.extend(history)
-        return messages
+            # Qwen3's template requires the system message to be first and
+            # rejects a second one, so fold web-search context into it.
+            system = f"{system}\n\n{extra}".strip()
+        return [{"role": "system", "content": system}, *history]
 
     @staticmethod
     def _log_attachments(session_id: str, attachments: list[dict[str, Any]]) -> None:

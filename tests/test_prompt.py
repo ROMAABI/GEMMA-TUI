@@ -51,3 +51,13 @@ def test_explicit_instructions_override_file(tmp_path: Path) -> None:
     )
     assert "from caller" in prompt
     assert "from file" not in prompt
+
+
+def test_agent_prompt_includes_omnidev_and_ownership(tmp_path: Path) -> None:
+    prompt = build_agent_system_prompt(str(tmp_path), "- read(path)", "")
+    assert "OMNIDEV" in prompt
+    assert "Abimanyu and Spix Corp" in prompt
+    assert "NOT by Google" in prompt
+    assert "AI models" in prompt
+    assert "{WORKSPACE}" not in prompt
+    assert "{TOOL_CATALOG}" not in prompt

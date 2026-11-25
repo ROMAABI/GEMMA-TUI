@@ -532,10 +532,13 @@ def test_research_endpoints(web, monkeypatch: pytest.MonkeyPatch) -> None:
         assert empty_data["healthy"] is False
         assert empty_data["detail"] == "Connection refused"
 
-        # Web context rides into the chat messages after the system prompt.
+        # Web context is folded into the single leading system message
+        # (Qwen3's template rejects a second system message).
         messages = server.build_messages("any", "CTX")
-        assert messages[1] == {"role": "system", "content": "CTX"}
-        assert len(server.build_messages("any")) == 1  # no context → no extra message
+        assert len(messages) == 1
+        assert messages[0]["role"] == "system"
+        assert messages[0]["content"].endswith("CTX")
+        assert "CTX" not in server.build_messages("any")[0]["content"]
 
 
 def test_compact_endpoint(web, monkeypatch: pytest.MonkeyPatch) -> None:
