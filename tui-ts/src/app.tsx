@@ -670,9 +670,6 @@ export function App(props: { chat: Chat }) {
       case "/web":
         pairBrowser()
         return true
-      case "/classic":
-        flash("The Textual UI is still available: gemma --classic")
-        return true
       case "/help":
         setOverlay({ kind: "help" })
         return true
@@ -819,7 +816,7 @@ export function App(props: { chat: Chat }) {
       onAttach={(path) => void props.chat.addAttachment(path)}
       onRemoveAttachment={(id) => props.chat.removeAttachment(id)}
       onPicker={() => setOverlay({ kind: "picker" })}
-      onPasteImage={() => void props.chat.pasteImage()}
+      onPasteClipboard={() => props.chat.pasteClipboard()}
       suggestPaths={(query) => props.chat.client.suggestPaths(query).then((data) => data.paths)}
       phase={liveAgentState().phase}
       elapsed={liveAgentState().elapsed}

@@ -1180,30 +1180,51 @@ export function createChat(client: GemmaClient) {
     setAttachments([])
   }
 
-  async function pasteImage(): Promise<void> {
+  /** Ctrl+V: attach a clipboard image if there is one, else return clipboard text. */
+  async function pasteClipboard(): Promise<string | null> {
     const { writeFileSync } = await import("node:fs")
     const { tmpdir } = await import("node:os")
     const { join } = await import("node:path")
     const wayland = Boolean(process.env.WAYLAND_DISPLAY)
     const command = wayland ? "wl-paste" : "xclip"
-    const args = wayland
+    const read = (args: string[]) => {
+      try {
+        return Bun.spawnSync([command, ...args], { stdout: "pipe", stderr: "pipe" })
+      } catch {
+        return null
+      }
+    }
+
+    const imageArgs = wayland
       ? ["--type", "image/png"]
       : ["-selection", "clipboard", "-t", "image/png", "-o"]
-    try {
-      const proc = Bun.spawnSync([command, ...args], { stdout: "pipe", stderr: "pipe" })
-      if (proc.exitCode !== 0 || !proc.stdout.length) {
-        throw new Error(
-          wayland
-            ? "No image in clipboard (wl-paste)"
-            : "No image in clipboard (install xclip: sudo pacman -S xclip)",
-        )
+    const image = read(imageArgs)
+    if (image && image.exitCode === 0 && image.stdout.length) {
+      try {
+        const target = join(tmpdir(), `gemma-clipboard-${Date.now()}.png`)
+        writeFileSync(target, image.stdout)
+        await addAttachment(target)
+      } catch (error) {
+        setNotice(error instanceof Error ? error.message : String(error))
       }
-      const target = join(tmpdir(), `gemma-clipboard-${Date.now()}.png`)
-      writeFileSync(target, proc.stdout)
-      await addAttachment(target)
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error))
+      return null
     }
+
+    const textArgs = wayland ? ["--type", "text/plain"] : ["-selection", "clipboard", "-o"]
+    const textProc = read(textArgs)
+    const decoder = new TextDecoder()
+    const text = textProc && textProc.exitCode === 0 ? decoder.decode(textProc.stdout) : ""
+    // Terminal pastes strip ANSI; do the same for an explicit clipboard read.
+    const clean = text.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
+    if (!clean.trim()) {
+      setNotice(
+        wayland
+          ? "Clipboard is empty (wl-paste)"
+          : "Clipboard is empty — install xclip: sudo pacman -S xclip",
+      )
+      return null
+    }
+    return clean
   }
 
   function stop(): void {
@@ -1400,7 +1421,7 @@ export function createChat(client: GemmaClient) {
     addAttachment,
     removeAttachment,
     clearAttachments,
-    pasteImage,
+    pasteClipboard,
     showThinking,
     toggleThinking: () => setShowThinking((value) => !value),
     connected,

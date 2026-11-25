@@ -192,7 +192,7 @@ export function ModelPicker(props: {
         </Show>
       </scrollbox>
       <text style={{ fg: colors().faint }} height={1}>
-        {`${modelCount()} models · ↑↓ choose · Enter select · Esc close`}
+        {`${modelCount()} model${modelCount() === 1 ? "" : "s"} · ↑↓ choose · Enter select · Esc close`}
       </text>
     </Frame>
   )

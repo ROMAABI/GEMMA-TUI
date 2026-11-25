@@ -48,7 +48,7 @@ export function Composer(props: {
   onAttach: (path: string) => void
   onRemoveAttachment: (id: string) => void
   onPicker: () => void
-  onPasteImage: () => void
+  onPasteClipboard: () => Promise<string | null>
   suggestPaths: (query: string) => Promise<string[]>
   phase?: AgentPhase
   elapsed?: number
@@ -143,6 +143,15 @@ export function Composer(props: {
     syncState()
   }
 
+  /** Insert clipboard text at the cursor (used by Ctrl+V). */
+  const pasteText = (text: string) => {
+    if (!area) return
+    const at = area.cursorOffset
+    const current = area.plainText
+    setText(current.slice(0, at) + text + current.slice(at))
+    area.cursorOffset = at + text.length
+  }
+
   createEffect(
     on(
       () => props.inject?.id,
@@ -158,9 +167,12 @@ export function Composer(props: {
     if (match) setText(`${match.name} `)
   }
 
-  const detectAndAttach = (text: string) => {
+  const detectAndAttach = (text: string, allowRaw = true) => {
     const paths = extractPaths(text)
-    const targets = paths.length ? paths : [text.trim()].filter(Boolean)
+    // A terminal paste is arbitrary text: never turn it into an attachment
+    // unless it actually contains an existing path. Palette/path completion
+    // passes a path explicitly, so it keeps the raw-text fallback.
+    const targets = paths.length ? paths : allowRaw ? [text.trim()].filter(Boolean) : []
     if (!targets.length) return false
     if (targets.length === 1 && (targets[0]!.endsWith("/") || isDirectoryPath(targets[0]!))) {
       setText(`/attach ${targets[0]}`)
@@ -193,8 +205,12 @@ export function Composer(props: {
 
   const onKeyDown = (event: KeyEvent) => {
     if (event.ctrl && event.name === "v") {
+      // Read the clipboard ourselves: terminals that do not send bracketed
+      // paste for Ctrl+V would otherwise drop the text entirely.
       event.preventDefault()
-      props.onPasteImage()
+      void props.onPasteClipboard().then((text) => {
+        if (text) pasteText(text)
+      })
       return
     }
     if (event.name === "backspace" && value() === "" && props.attachments.length) {
@@ -247,7 +263,7 @@ export function Composer(props: {
 
   const onPaste = (event: { bytes: Uint8Array; preventDefault: () => void }) => {
     const text = new TextDecoder().decode(event.bytes)
-    if (detectAndAttach(text)) event.preventDefault()
+    if (detectAndAttach(text, false)) event.preventDefault()
   }
 
   const handleContentChange = (_event: unknown) => {

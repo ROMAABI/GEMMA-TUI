@@ -1,8 +1,9 @@
-"""Launcher tests: OpenTUI by default, Textual behind ``--classic``."""
+"""Launcher tests: the OpenTUI client is the only terminal UI."""
 
 from __future__ import annotations
 
 import atexit
+from subprocess import CompletedProcess
 
 import pytest
 from typer.testing import CliRunner
@@ -11,31 +12,22 @@ from app import cli
 from config.settings import Settings
 
 runner = CliRunner()
+_REAL_ENSURE_DEPS = cli._ensure_tui_deps
 
 
 @pytest.fixture(autouse=True)
 def _no_side_effects(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(cli, "_ensure_server", lambda _url: True)
     monkeypatch.setattr(cli, "stop_llama_server", lambda: 0)
+    monkeypatch.setattr(cli, "_ensure_tui_deps", lambda _bun: True)
     monkeypatch.setattr(atexit, "register", lambda *_args, **_kwargs: None)
-
-
-class _FakeTUI:
-    def __init__(self, **_kwargs) -> None:
-        pass
-
-    def run(self) -> None:
-        pass
 
 
 def test_default_launches_opentui(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
-    monkeypatch.setattr(cli, "_run_opentui", lambda settings, session=None, **_kwargs: calls.append("opentui") or True)
-    def fake_tui(**_kwargs):
-        calls.append("classic")
-        return _FakeTUI()
-
-    monkeypatch.setattr(cli, "GemmaTUI", fake_tui)
+    monkeypatch.setattr(
+        cli, "_run_opentui", lambda settings, session=None, **_kwargs: calls.append("opentui") or True
+    )
 
     result = runner.invoke(cli.app, [])
 
@@ -43,35 +35,49 @@ def test_default_launches_opentui(monkeypatch: pytest.MonkeyPatch) -> None:
     assert calls == ["opentui"]
 
 
-def test_classic_skips_opentui(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[str] = []
-    monkeypatch.setattr(cli, "_run_opentui", lambda settings, session=None, **_kwargs: calls.append("opentui") or True)
-    def fake_tui(**_kwargs):
-        calls.append("classic")
-        return _FakeTUI()
-
-    monkeypatch.setattr(cli, "GemmaTUI", fake_tui)
+def test_classic_option_is_gone(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "_run_opentui", lambda settings, session=None, **_kwargs: True)
 
     result = runner.invoke(cli.app, ["--classic"])
 
-    assert result.exit_code == 0, result.output
-    assert calls == ["classic"]
+    assert result.exit_code != 0
+    assert "--classic" in result.output
 
 
-def test_falls_back_when_opentui_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[str] = []
+def test_opentui_failure_exits_without_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli, "_run_opentui", lambda settings, session=None, **_kwargs: False)
-    def fake_tui(**_kwargs):
-        calls.append("classic")
-        return _FakeTUI()
-
-    monkeypatch.setattr(cli, "GemmaTUI", fake_tui)
 
     result = runner.invoke(cli.app, [])
 
-    assert result.exit_code == 0, result.output
-    assert calls == ["classic"]
-    assert "Falling back" in result.output
+    assert result.exit_code == 1
+    assert "Falling back" not in result.output
+
+
+def test_first_launch_runs_the_installer(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_run(command: list[str], **kwargs: object):
+        seen["command"] = command
+        seen["env"] = kwargs.get("env", {})
+        return CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    monkeypatch.setattr(cli, "_opentui_ready", lambda _bun: True)
+    monkeypatch.setattr(cli, "_ensure_tui_deps", _REAL_ENSURE_DEPS)
+
+    assert cli._ensure_tui_deps("/usr/bin/bun") is True
+    assert seen["command"] == ["bash", str(cli.INSTALL_SCRIPT)]
+    assert (seen["env"] or {}).get("BUN") == "/usr/bin/bun"  # type: ignore[union-attr]
+
+
+def test_failed_install_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run(command: list[str], **_kwargs: object):
+        return CompletedProcess(command, 1, "", "bun: not found")
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    monkeypatch.setattr(cli, "_ensure_tui_deps", _REAL_ENSURE_DEPS)
+
+    assert cli._ensure_tui_deps("/usr/bin/bun") is False
 
 
 def test_opentui_ready_needs_bun_and_install(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:

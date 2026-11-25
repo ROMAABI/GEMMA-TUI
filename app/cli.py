@@ -15,7 +15,6 @@ from rich.console import Console
 from app.lifecycle import server_is_healthy, stop_llama_server
 from config.settings import Settings
 from sessions.store import SessionStore
-from tui.app import GemmaTUI
 from utils.paths import server_log_path
 
 app = typer.Typer(no_args_is_help=False, add_completion=False)
@@ -23,25 +22,49 @@ console = Console()
 
 
 def _ensure_server(base_url: str) -> bool:
-    """Start the llama.cpp server if it is not already running."""
+    """Start the llama.cpp server if it is not already running.
+
+    A service that exits immediately (for example because its GGUF file is
+    missing) must not cost a full minute of polling on every launch.
+    """
     if server_is_healthy(base_url):
         return True
     try:
-        subprocess.run(
+        started = subprocess.run(
             ["systemctl", "--user", "start", "gemma-llama-server"],
             check=False,
             capture_output=True,
+            text=True,
+            timeout=10,
         )
-    except FileNotFoundError:
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+    if started.returncode != 0:
         return False
     for _ in range(60):
         if server_is_healthy(base_url):
             return True
+        try:
+            state = subprocess.run(
+                ["systemctl", "--user", "show", "-p", "SubState", "--value", "gemma-llama-server"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=2,
+            ).stdout.strip()
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            state = ""
+        # `auto-restart` means the service already crashed and systemd is
+        # retrying (a missing model, for example), so health will never come.
+        if state in {"failed", "auto-restart"}:
+            return False
         time.sleep(1)
     return False
 
 
-TUI_DIR = Path(__file__).resolve().parent.parent / "tui-ts"
+ROOT_DIR = Path(__file__).resolve().parent.parent
+TUI_DIR = ROOT_DIR / "tui-ts"
+INSTALL_SCRIPT = ROOT_DIR / "scripts" / "install_tui_deps.sh"
 
 
 @dataclass
@@ -99,6 +122,27 @@ def _opentui_ready(bun: str | None) -> bool:
     return bool(bun) and (TUI_DIR / "src" / "index.tsx").exists() and (TUI_DIR / "node_modules").exists()
 
 
+def _ensure_tui_deps(bun: str) -> bool:
+    """Run the Bun installer on first launch, then verify the client is ready."""
+    try:
+        completed = subprocess.run(
+            ["bash", str(INSTALL_SCRIPT)],
+            env={**os.environ, "BUN": bun},
+            capture_output=True,
+            text=True,
+        )
+    except OSError as error:
+        console.print(f"[red]Could not run the OpenTUI installer:[/red] {error}")
+        return False
+    if completed.returncode != 0:
+        console.print("[red]Could not install the OpenTUI client dependencies.[/red]")
+        detail = (completed.stderr or completed.stdout).strip()
+        if detail:
+            console.print(f"[dim]{detail}[/dim]")
+        return False
+    return _opentui_ready(bun)
+
+
 def _run_opentui(
     settings: Settings,
     session_id: str | None = None,
@@ -107,18 +151,14 @@ def _run_opentui(
 ) -> bool:
     """Start the shared server and hand the terminal to the OpenTUI client.
 
-    Returns False when the client cannot run, so the caller can fall back to the
-    Textual TUI instead of leaving the user with no interface.
+    Returns False only when the client could not be started at all; there is no
+    Python TUI fallback.
     """
     bun = _find_bun()
-    if not _opentui_ready(bun):
-        if bun is None:
-            console.print("[yellow]Bun was not found, so the OpenTUI client cannot start.[/yellow]")
-        else:
-            console.print(
-                "[yellow]The OpenTUI client is not installed. Run "
-                "[/yellow][cyan]cd tui-ts && bun install[/cyan][yellow].[/yellow]"
-            )
+    if bun is None:
+        console.print("[red]Bun is required for the OpenTUI client. Install it from https://bun.sh[/red]")
+        return False
+    if not _ensure_tui_deps(bun):
         return False
 
     from core.webui import GemmaWebServer
@@ -154,8 +194,8 @@ def _run_opentui(
 
         if completed is None:
             return True
-        # A crash before the first frame means the client is unusable here; let the
-        # caller fall back to the classic TUI.
+        # Treat a crash before the first frame as a failure to launch; anything
+        # that survived longer than two seconds is a normal quit.
         return completed.returncode == 0 or (time.monotonic() - started) > 2.0
 
 
@@ -167,11 +207,6 @@ def main(
         False, "--continue", "-c", help="Open the last session instead of a fresh New chat."
     ),
     model: str | None = typer.Option(None, "--model", "-m", help="Use a model alias."),
-    classic: bool = typer.Option(
-        False,
-        "--classic",
-        help="Use the Textual TUI (agent mode, permissions and MCP) instead of OpenTUI.",
-    ),
 ) -> None:
     if ctx.invoked_subcommand:
         return
@@ -182,18 +217,18 @@ def main(
 
     was_running = server_is_healthy(settings.base_url)
     if not _ensure_server(settings.base_url):
-        console.print("[yellow]Warning: llama.cpp server is not running. [/yellow]")
+        console.print(
+            "[yellow]Warning: llama.cpp server is not running — chat is unavailable. "
+            "Check [/yellow][cyan]systemctl --user status gemma-llama-server[/cyan] "
+            "[yellow](and that models/*.gguf exists).[/yellow]"
+        )
     elif not was_running:
         # Only stop what this process started; a pre-existing llama.cpp server
         # (or one owned by another tool) stays up after the TUI exits.
         atexit.register(stop_llama_server)
 
-    if not classic and _run_opentui(settings, session, continue_last=continue_last):
-        return
-    if not classic:
-        console.print("[dim]Falling back to the classic TUI (gemma --classic).[/dim]")
-
-    GemmaTUI(settings=settings, initial_session_id=session).run()
+    if not _run_opentui(settings, session, continue_last=continue_last):
+        raise typer.Exit(code=1)
 
 
 @app.command()

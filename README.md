@@ -64,7 +64,7 @@ Switch anytime: `/theme cyberpunk`
 - **🤖 Agent mode** — multi-turn ReAct loop, auto intent-detect (`create a script`, `run pytest`…) or `/mode agent`
   - Tools: `read_file` · `write_file` · `edit_file` · `list_dir` (50 entries, non-recursive) · `grep_search` · `run_command` · `web_search` · `webfetch`
   - Sandboxed to `workspace_dir` (default `.`), path-escape blocked
-- **🖼 Attachments** — images/videos/PDF/text/code via `/attach`, `Ctrl+O` picker, drag-style paste, or `Ctrl+V` clipboard image; multimodal via llama.cpp `--mmproj`
+- **🖼 Attachments** — images/videos/PDF/text/code via `/attach`, `Ctrl+O` picker, drag-style paste, or `Ctrl+V` clipboard image/text; multimodal via llama.cpp `--mmproj`
 - **🔍 Web Search RAG** — query rewrite from chat history, intent routing, entity relevance gate, local SearXNG → public fallback → DuckDuckGo, retailer pages for availability, Jina Reader / direct fetch deep-read → grounded answer with sources
 - **🛑 Cancellation** — `Ctrl+C`, `/stop`, or `Ctrl+X s` cancels the active turn; queued messages continue
 - **🎨 7 themes** — `tokyo-night` (default), `dracula`, `deep-purple`, `nord`, `cyberpunk`, `emerald`, `system` (transparent)
@@ -83,17 +83,17 @@ git clone https://github.com/ROMAABI/GEMMA-TUI.git
 cd GEMMA-TUI
 pip install -e .
 
-# 2. Get a model (~2.5 GB) — the default config expects this one
+# 2. Get a model (~5.6 GB) — the default config/service expects this one
 mkdir -p models
-wget -O models/gemma-4-E4B-it-ultra-uncensored-heretic-Q4_K_M.gguf \
-  https://huggingface.co/llmfan46/gemma-4-E4B-it-ultra-uncensored-heretic-GGUF/resolve/main/gemma-4-E4B-it-ultra-uncensored-heretic-Q4_K_M.gguf
+wget -O models/Qwen3.5-9B-abliterated.Q4_K_M.gguf \
+  https://huggingface.co/mradermacher/Qwen3.5-9B-abliterated-GGUF/resolve/main/Qwen3.5-9B-abliterated.Q4_K_M.gguf
 
-# Optional: vision projector for image/video attachments
-wget -O models/gemma-4-E4B-it-mmproj-BF16.gguf \
-  https://huggingface.co/llmfan46/gemma-4-E4B-it-ultra-uncensored-heretic-GGUF/resolve/main/gemma-4-E4B-it-mmproj-BF16.gguf
+# Optional: vision projector for image/video attachments (Abiray GGUF repo)
+# wget -O models/mmproj-f16.gguf \
+#   https://huggingface.co/Abiray/Qwen3.5-9B-abliterated-GGUF/resolve/main/mmproj-f16.gguf
 
 # 3. Start llama.cpp server (add --mmproj for attachments)
-llama-server -m models/gemma-4-E4B-it-ultra-uncensored-heretic-Q4_K_M.gguf \
+llama-server -m models/Qwen3.5-9B-abliterated.Q4_K_M.gguf \
   --mmproj models/gemma-4-E4B-it-mmproj-BF16.gguf --port 8080 --ctx-size 8192
 
 # 4. Launch (new terminal)
@@ -122,7 +122,7 @@ You should see the welcome screen (`assets/01-welcome.png`). Type `hello` → st
 python3 -m venv .venv && source .venv/bin/activate
 pip install -U pip
 pip install -e .
-gemma-local --help
+gemma-local --help          # Bun deps for tui-ts/ are installed on first launch
 ```
 
 ### Option B — user install
@@ -186,8 +186,7 @@ Script does: detect `docker`/`podman` → generate `searxng/settings.yml` (secre
 ### Launch
 
 ```bash
-gemma-local                  # OpenTUI client (default)
-gemma-local --classic        # Textual TUI (alternative front end)
+gemma-local                  # OpenTUI client (Bun + Solid)
 python main.py               # same, without install
 gemma-local -s <session_id>  # open a specific session
 gemma-local --continue       # open the last session (default: fresh New chat)
@@ -195,14 +194,14 @@ gemma-local -m <model_name>  # start with specific model
 ```
 
 `gemma-local` starts the shared server (`core/webui.py`) and hands the terminal
-to the OpenTUI client in `tui-ts/` (Bun + Solid). The client pairs with the server
-using a one-time link, then talks to the same `/api` routes the web UI uses, so
-terminal and browser share sessions. If Bun or `tui-ts/node_modules` is missing,
-it prints how to install it and falls back to the Textual TUI. Both clients
-share the same agent runtime: the server exposes `/api/agent` (SSE), tool
-permissions and the provider catalog, so the OpenTUI client has agent mode,
-tool calls and approval prompts too. `--classic` keeps the Textual TUI as an
-alternative front end.
+to the OpenTUI client in `tui-ts/` (Bun + Solid). On first launch
+`scripts/install_tui_deps.sh` installs the Bun dependencies (and again whenever
+`bun.lock` changes); the launch stops with an error if Bun is missing or the
+install fails. The client pairs with the server using a one-time link, then
+talks to the same `/api` routes the web UI uses, so terminal and browser share
+sessions. The server exposes `/api/agent` (SSE), tool permissions and the
+provider catalog, so the client has agent mode, tool calls and approval prompts.
+The Python (Textual) TUI is no longer part of the launch path.
 
 ### Web UI (paired, OpenCode-style)
 
@@ -225,7 +224,6 @@ server has loaded, and stops when the TUI exits.
 | Command | What it does |
 |---|---|
 | `gemma-local` | Open the OpenTUI client (auto-starts `systemd --user gemma-llama-server` if present, warns otherwise) |
-| `gemma-local --classic` | Open the Textual TUI instead of the OpenTUI client |
 | `gemma-local models` | Table of discovered `models/*.gguf` + which is active |
 | `gemma-local model [name]` | No arg = list; with arg = switch active model |
 | `gemma-local switch <name>` | Switch active model alias |
@@ -233,7 +231,7 @@ server has loaded, and stops when the TUI exits.
 | `gemma-local sessions` | List saved sessions (`id  title  updated_at`) |
 | `gemma-local config` | Print resolved config as JSON |
 
-Flags: `--session/-s <id>`, `--continue/-c`, `--model/-m <name>`, `--classic`.
+Flags: `--session/-s <id>`, `--continue/-c`, `--model/-m <name>`.
 
 Every launch opens an empty `New chat` (landing screen); old sessions stay in
 the sidebar. Use `--continue` to reopen the last conversation. `Ctrl+N` starts
@@ -278,7 +276,7 @@ Type `/` for autocomplete, or `Ctrl+P` for palette.
 | `Ctrl+X` then `h` | Commands & keys |
 | `Ctrl+X` then `q` | Quit |
 | `Ctrl+O` | File picker / attach |
-| `Ctrl+V` | Attach image from clipboard (`wl-paste` / `xclip`) |
+| `Ctrl+V` | Paste clipboard text, or attach a clipboard image when one is present (`wl-paste` / `xclip`) |
 | `Ctrl+U` | Clear the message queue |
 | `Ctrl+P` | Command palette (`/`) |
 | `Ctrl+B` | Toggle sidebar (hidden below 120 cols; overlay when manually opened narrow) |
@@ -318,32 +316,15 @@ with `is_default`); `POST /api/models {"provider":"ollama","name":"…"}` points
 the client at that endpoint and saves `base_url` + `model`. The picker groups
 models by provider; `Ctrl+K` or `/model` opens it.
 
-### Textual keyboard shortcuts (`--classic`)
-
-| Key | Action |
-|---|---|
-| `Enter` / `Ctrl+Enter` | Send |
-| `Shift+Enter` | Newline |
-| `Ctrl+B` | Sidebar |
-| `Ctrl+P` | Command palette |
-| `Ctrl+N` | New chat |
-| `Ctrl+L` | Clear view |
-| `Ctrl+Y` | Copy last reply |
-| `Ctrl+W` | Open the web UI |
-| `Ctrl+C` | Cancel streaming / agent step |
-| `Ctrl+D` | Quit |
-| `Delete` | Delete session |
-| `Esc` | Close popup |
-
----
-
 ## 🖼 Attachments & multimodal input
 
 Attach files with `/attach <path>` (Tab completes paths), `Ctrl+O` (file picker),
 or by pasting one or more file paths into the composer (quoted, escaped, or
-`file://` URIs). `Ctrl+V` attaches an image from the clipboard (`wl-paste` on
-Wayland, `xclip` on X11). Up to 8 files, 20 MB each; chips appear above the input
-and Backspace on an empty prompt removes the last chip.
+`file://` URIs). `Ctrl+V` pastes clipboard text and attaches a clipboard image
+when one is present (`wl-paste` on Wayland, `xclip` on X11). Up to 8 files,
+20 MB each; chips appear above the input and Backspace on an empty prompt removes
+the last chip. Terminals that send bracketed paste (middle click, Ctrl+Shift+V)
+insert text directly.
 
 | Type | Handling |
 |---|---|

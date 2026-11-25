@@ -21,7 +21,6 @@ export const TUI_COMMANDS: CommandDef[] = [
   { name: "/history", description: "List saved sessions" },
   { name: "/config", description: "Show current config" },
   { name: "/web", description: "Pair a browser (prints a link)" },
-  { name: "/classic", description: "Open the Textual TUI instead" },
   { name: "/help", description: "Show commands and keys" },
   { name: "/exit", description: "Quit" },
 ]

@@ -11,9 +11,11 @@ to the same routes.
 `gemma` (or `gemma-local`) starts the server and this client for you:
 
 ```bash
-gemma              # OpenTUI client (default)
-gemma --classic    # Textual TUI
+gemma              # installs deps on first launch, then opens this client
 ```
+
+The Python launcher runs `scripts/install_tui_deps.sh` before starting the
+server and this client, so a fresh checkout only needs `bun` on `PATH`.
 
 Standalone, against an already-running server:
 

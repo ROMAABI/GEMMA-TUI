@@ -587,34 +587,11 @@ class _Handler(BaseHTTPRequestHandler):
         }
 
     def _models(self) -> dict[str, Any]:
-        """Current, server-loaded and local GGUF models, de-duplicated."""
+        """Current, server-loaded and local GGUF models, de-duplicated by file."""
+        from core.provider_catalog import local_models
+
         settings = self.gemma.settings
-        entries: list[dict[str, Any]] = []
-        seen: set[str] = set()
-
-        def add(name: str, source: str) -> None:
-            name = (name or "").strip()
-            if name and name not in seen:
-                seen.add(name)
-                entries.append({"name": name, "source": source, "active": name == settings.model})
-
-        add(settings.model, "current")
-        try:
-            from app.lifecycle import get_loaded_model
-
-            loaded = get_loaded_model(settings.base_url)
-            if loaded:
-                add(loaded, "loaded")
-        except Exception:  # noqa: BLE001 - the model list must always render
-            pass
-        try:
-            from models.registry import get_available_models
-
-            for name in get_available_models().keys():
-                add(name, "local")
-        except Exception:  # noqa: BLE001
-            pass
-        return {"active": settings.model, "models": entries}
+        return {"active": settings.model, "models": local_models(settings)}
 
     def _switch_model(self) -> None:
         try:

@@ -24,3 +24,6 @@ tui-ts/node_modules/
 
 # Python venv
 .venv/
+
+# OpenTUI first-install stamp
+tui-ts/.deps-stamp

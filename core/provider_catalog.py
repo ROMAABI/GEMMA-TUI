@@ -18,16 +18,38 @@ LOCAL_PROVIDER_ID = "llama.cpp"
 _PROBE_TIMEOUT = 1.5
 
 
-def _local_models(settings: Any) -> list[dict[str, Any]]:
-    """Current, server-loaded and local GGUF models, de-duplicated."""
+def local_models(settings: Any) -> list[dict[str, Any]]:
+    """Current, server-loaded and local GGUF models, de-duplicated by file.
+
+    The registry exposes both a stem alias and the exact filename for every
+    GGUF. Deduping only by display name leaves the same file listed twice in
+    the model picker, so collapse aliases that point at the same file and keep
+    the first (current/loaded) name.
+    """
     entries: list[dict[str, Any]] = []
-    seen: set[str] = set()
+    seen_names: set[str] = set()
+    seen_files: set[str] = set()
+    try:
+        from models.registry import get_available_models
+
+        profiles = get_available_models()
+    except Exception:  # noqa: BLE001 - the catalog must always render
+        profiles = {}
+
+    def canonical(name: str) -> str:
+        profile = profiles.get(name)
+        return (profile.filename or name) if profile else name
 
     def add(name: str, source: str) -> None:
         name = (name or "").strip()
-        if name and name not in seen:
-            seen.add(name)
-            entries.append({"name": name, "source": source, "active": name == settings.model})
+        if not name:
+            return
+        key = canonical(name)
+        if name in seen_names or key in seen_files:
+            return
+        seen_names.add(name)
+        seen_files.add(key)
+        entries.append({"name": name, "source": source, "active": name == settings.model})
 
     add(settings.model, "current")
     try:
@@ -38,14 +60,12 @@ def _local_models(settings: Any) -> list[dict[str, Any]]:
             add(loaded, "loaded")
     except Exception:  # noqa: BLE001 - the catalog must always render
         pass
-    try:
-        from models.registry import get_available_models
-
-        for name in get_available_models().keys():
-            add(name, "local")
-    except Exception:  # noqa: BLE001
-        pass
+    for name in profiles:
+        add(name, "local")
     return entries
+
+
+_local_models = local_models  # back-compat for callers importing the old name
 
 
 def _env_providers() -> list[dict[str, Any]]:
@@ -100,7 +120,7 @@ def catalog(settings: Any) -> dict[str, Any]:
             "base_url": settings.base_url,
             "is_default": True,
             "default_model": settings.model,
-            "models": _local_models(settings),
+            "models": local_models(settings),
         }
     ]
 
