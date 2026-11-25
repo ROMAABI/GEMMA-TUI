@@ -272,7 +272,7 @@ export function App(props: { chat: Chat }) {
       if (streaming()) {
         try {
           props.chat.stop()
-          flash("Stopping…")
+          flash("Stopped — the reply so far is kept")
         } catch {
           flash("Could not stop the run — try /stop")
         }

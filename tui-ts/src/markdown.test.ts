@@ -8,6 +8,14 @@ describe("parseMarkdown", () => {
     expect(blocks[1]).toEqual({ kind: "paragraph", text: "Hello there.\nSecond line." })
   })
 
+  test("reads **bold** and __bold__ lines as headings", () => {
+    const blocks = parseMarkdown("**Frontend (Client-Side)**\n- HTML/CSS\n\n__Backend__\ntext")
+    expect(blocks[0]).toEqual({ kind: "heading", level: 2, text: "Frontend (Client-Side)" })
+    expect(blocks[1]).toEqual({ kind: "list", ordered: false, start: 1, items: ["HTML/CSS"] })
+    expect(blocks[2]).toEqual({ kind: "heading", level: 2, text: "Backend" })
+    expect(blocks[3]).toEqual({ kind: "paragraph", text: "text" })
+  })
+
   test("reads fenced code and keeps the language", () => {
     const blocks = parseMarkdown("Before\n\n```python\nprint('hi')\n```\n\nAfter")
     expect(blocks.map((block) => block.kind)).toEqual(["paragraph", "code", "paragraph"])

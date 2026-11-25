@@ -24,6 +24,38 @@ function fakeClient() {
   }
 }
 
+test("stop() keeps the partial chat reply and the rest of the transcript", async () => {
+  const client = {
+    ...fakeClient(),
+    info: async () => ({ app: "gemma", mode: "chat", model: "m", version: "1", context_max: 8192 }),
+    streamChat: async (
+      _sid: string,
+      _message: string,
+      handlers: { onToken?: (token: string) => void },
+      signal?: AbortSignal,
+    ) => {
+      handlers.onToken?.("Half of the answer")
+      await new Promise<void>((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")))
+      })
+    },
+  }
+  const chat = createChat(client as never)
+  await chat.load()
+  chat.setWebsearch(false)
+
+  const running = chat.send("hello")
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  chat.stop()
+  await running
+
+  const messages = chat.activeSession()?.messages ?? []
+  const assistant = messages.find((message) => message.role === "assistant")
+  expect(messages.some((message) => message.role === "user" && message.content === "hello")).toBe(true)
+  expect(assistant?.content).toContain("Half of the answer")
+  expect(assistant?.stopped).toBe(true)
+})
+
 test("stop() marks an agent turn as stopped even on a non-AbortError", async () => {
   const chat = createChat(fakeClient() as never)
   await chat.load()

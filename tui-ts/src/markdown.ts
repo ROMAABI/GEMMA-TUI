@@ -25,6 +25,8 @@ export type Block =
 
 const FENCE = /^\s*(```|~~~)\s*([\w+-]*)\s*$/
 const HEADING = /^(#{1,6})\s+(.*)$/
+// Models often use `**Section**` / `__Section__` instead of `#` for headings.
+const BOLD_HEADING = /^\s*(\*\*|__)(.+?)\1\s*$/
 const BULLET = /^\s*[-*+]\s+(.*)$/
 const ORDERED = /^\s*(\d+)[.)]\s+(.*)$/
 const QUOTE = /^\s*>\s?(.*)$/
@@ -72,6 +74,13 @@ export function parseMarkdown(source: string): Block[] {
     const heading = HEADING.exec(line)
     if (heading) {
       blocks.push({ kind: "heading", level: heading[1]!.length, text: heading[2]!.trim() })
+      index++
+      continue
+    }
+
+    const boldHeading = BOLD_HEADING.exec(line)
+    if (boldHeading) {
+      blocks.push({ kind: "heading", level: 2, text: boldHeading[2]!.trim() })
       index++
       continue
     }
@@ -126,6 +135,7 @@ export function parseMarkdown(source: string): Block[] {
         !next.trim() ||
         FENCE.test(next) ||
         HEADING.test(next) ||
+        BOLD_HEADING.test(next) ||
         RULE.test(next) ||
         BULLET.test(next) ||
         ORDERED.test(next) ||

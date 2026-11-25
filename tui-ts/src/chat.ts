@@ -752,9 +752,12 @@ export function createChat(client: GemmaClient) {
   ): void {
     const aborted = stopped || wasStopped(error)
     if (aborted) {
+      // Ctrl+C stops generation only: keep whatever the model already sent
+      // and leave the rest of the transcript untouched.
       patchMessage(sessionId, assistantId, (message) => ({
         ...message,
-        content: content || "_Generation stopped._",
+        parts: content ? [{ kind: "text", text: content }] : message.parts,
+        content: content || "Stopped before the reply started.",
         stopped: true,
         elapsed: message.elapsed ?? 0,
       }))
