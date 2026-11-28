@@ -58,6 +58,10 @@ class ToolContext:
         raw = (path or ".").strip()
         if not raw:
             raw = "."
+        # Models frequently write `~/file`; treat it as the home directory
+        # instead of creating a literal `~` folder in the workspace.
+        if raw == "~" or raw.startswith("~/"):
+            raw = str(Path(raw).expanduser())
         candidate = Path(raw)
         target = candidate if candidate.is_absolute() else self.root / candidate
         target = target.resolve()
@@ -81,6 +85,15 @@ class ToolContext:
 ToolHandler = Callable[[ToolContext, dict[str, Any]], Awaitable[ToolResult] | ToolResult]
 
 
+def _strip_descriptions(value: Any) -> Any:
+    """Recursively remove `description` fields from a JSON schema."""
+    if isinstance(value, dict):
+        return {key: _strip_descriptions(item) for key, item in value.items() if key != "description"}
+    if isinstance(value, list):
+        return [_strip_descriptions(item) for item in value]
+    return value
+
+
 @dataclass
 class ToolSpec:
     """A model-visible tool and its implementation."""
@@ -93,13 +106,24 @@ class ToolSpec:
     aliases: tuple[str, ...] = ()
     max_output_chars: int = 30_000
 
-    def openai_schema(self) -> dict[str, Any]:
+    def openai_schema(self, compact: bool = True) -> dict[str, Any]:
+        """Schema sent to the model.
+
+        Compact mode keeps every tool, required field and type but drops the
+        verbose per-property descriptions. Those cost thousands of prompt
+        tokens on a CPU-only model and are rarely needed for obvious names.
+        """
+        description = self.description
+        parameters = self.parameters
+        if compact:
+            description = description.strip().splitlines()[0][:140] if description else self.name
+            parameters = _strip_descriptions(self.parameters)
         return {
             "type": "function",
             "function": {
                 "name": self.name,
-                "description": self.description,
-                "parameters": self.parameters,
+                "description": description,
+                "parameters": parameters,
             },
         }
 

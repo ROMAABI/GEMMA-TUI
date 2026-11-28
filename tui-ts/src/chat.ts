@@ -16,6 +16,13 @@ import {
   type ServerMessage,
 } from "./api"
 import { displayModelName, estimateTokens } from "./format"
+import {
+  DEFAULT_SAMPLING,
+  DEFAULT_SYSTEM_PROMPT,
+  savePrefs,
+  type Prefs,
+  type Sampling,
+} from "./prefs"
 
 export interface QueuedMessage {
   id: string
@@ -227,7 +234,13 @@ function fromServer(messages: ServerMessage[]): Message[] {
   return merged
 }
 
-export function createChat(client: GemmaClient) {
+export function createChat(client: GemmaClient, prefs?: Prefs) {
+  let systemPrompt = prefs?.systemPrompt ?? DEFAULT_SYSTEM_PROMPT
+  const sampling: Sampling = prefs?.sampling ?? DEFAULT_SAMPLING
+  const setSystemPrompt = (text: string) => {
+    systemPrompt = text
+    if (prefs) savePrefs({ ...prefs, systemPrompt: text })
+  }
   const [sessions, setSessions] = createSignal<Session[]>([])
   const [activeId, setActiveId] = createSignal("")
   const [streaming, setStreaming] = createSignal(false)
@@ -878,10 +891,10 @@ export function createChat(client: GemmaClient) {
     let memoryFallback = false
     const statsBox: { value: DoneStats | null } = { value: null }
 
+    let context: string | undefined
     // Web research: the server judges the question (with the same heuristics
     // as the classic TUI) and fetches SearXNG context, which rides into the
     // request as a system message. Sources show under the answer.
-    let context: string | undefined
     if (websearch() && !SMALLTALK_RE.test(raw.trim())) {
       const prep = await prepareSearch(sessionId, assistantId, raw.trim())
       context = prep.context
@@ -915,6 +928,8 @@ export function createChat(client: GemmaClient) {
         controller?.signal,
         context,
         atts,
+        sampling,
+        systemPrompt,
       )
 
       const finalStats = statsBox.value
@@ -953,9 +968,9 @@ export function createChat(client: GemmaClient) {
     let currentRun = ""
     let memoryFallback = false
 
+    let context: string | undefined
     // Web research rides into the agent run as extra system context, so tool
     // work still happens but facts come from the fresh results.
-    let context: string | undefined
     if (websearch() && !SMALLTALK_RE.test(raw.trim())) {
       const prep = await prepareSearch(sessionId, assistantId, raw.trim())
       context = prep.context
@@ -1109,6 +1124,8 @@ export function createChat(client: GemmaClient) {
         controller?.signal,
         context,
         atts,
+        sampling,
+        systemPrompt,
       )
 
       const elapsed = (performance.now() - startedAt) / 1000
@@ -1439,6 +1456,9 @@ export function createChat(client: GemmaClient) {
     clearQueue,
     respondPermission,
     setNotice,
+    systemPrompt: () => systemPrompt,
+    setSystemPrompt,
+    sampling: () => sampling,
     live,
   }
 }

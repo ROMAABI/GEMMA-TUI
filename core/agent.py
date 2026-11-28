@@ -124,7 +124,9 @@ class AgentOrchestrator:
         compactor: Compactor | None = None,
         skills: Any = None,
         extra_context: str = "",
+        sampling: dict[str, float] | None = None,
     ) -> None:
+        self.sampling = sampling or {}
         if client is None:
             if settings is None:
                 from config.settings import Settings
@@ -264,48 +266,90 @@ class AgentOrchestrator:
         state: dict[str, Any],
     ) -> AsyncIterator[AgentEvent]:
         tools = self.registry.openai_tools()
-        async for event in self.provider.stream(
-            conversation,
-            tools,
-            temperature=getattr(self.settings, "temperature", 0.7),
-            max_tokens=getattr(self.settings, "agent_max_tokens", 4096),
-        ):
-            if event.type == "text":
-                state["text"].append(event.text)
-                yield AgentEvent("text", event.text)
-            elif event.type == "text_replace":
-                # Tool-call XML arrived as text; keep only the real prose.
-                state["text"] = [event.text] if event.text else []
-                yield AgentEvent("text_replace", event.text)
-            elif event.type == "reasoning":
-                state["reasoning"].append(event.text)
-                yield AgentEvent("reasoning", event.text)
-            elif event.type == "tool_calls":
-                state["tool_calls"] = event.tool_calls
-            elif event.type == "usage":
-                state["usage"].update(event.usage)
-                completion = event.usage.get("output_tokens")
-                if isinstance(completion, int):
-                    state["gen_tokens_total"] += completion
-                gen_ms = event.usage.get("gen_ms")
-                if isinstance(gen_ms, (int, float)):
-                    state["gen_ms_total"] += float(gen_ms)
-                # Cumulative across tool steps: one stats line for the whole
-                # turn, computed from the same generation counters everywhere.
-                yield AgentEvent(
-                    "usage",
-                    {
-                        **event.usage,
-                        "output_tokens": state["gen_tokens_total"],
-                        "gen_ms": round(state["gen_ms_total"], 1),
-                        # Real prompt_n from llama.cpp for this step, including
-                        # tool outputs; the UI shows this as ctx usage.
-                        "prompt_tokens": state["usage"].get("input_tokens", 0),
-                    },
+        max_tokens = max(1, int(getattr(self.settings, "agent_max_tokens", 4096)))
+        retrying = False
+
+        while True:
+            # Buffer tool-call events until the step ends: if the model ran
+            # out of tokens in the middle of a JSON argument string, the
+            # parsed call is broken and must be re-generated, not executed.
+            tool_events: list[Any] = []
+            async for event in self.provider.stream(
+                conversation,
+                tools,
+                temperature=getattr(self, "sampling", {}).get(
+                    "temperature", getattr(self.settings, "temperature", 0.7)
+                ),
+                max_tokens=max_tokens,
+                top_p=getattr(self, "sampling", {}).get("top_p"),
+                repeat_penalty=getattr(self, "sampling", {}).get("repeat_penalty"),
+            ):
+                if event.type in ("tool_calls", "usage", "done"):
+                    tool_events.append(event)
+                    continue
+                if retrying:
+                    # Text from the first attempt was already shown; never
+                    # duplicate it when retrying just to recover a tool call.
+                    continue
+                if event.type == "text":
+                    state["text"].append(event.text)
+                    yield AgentEvent("text", event.text)
+                elif event.type == "text_replace":
+                    # Tool-call XML arrived as text; keep only the real prose.
+                    state["text"] = [event.text] if event.text else []
+                    yield AgentEvent("text_replace", event.text)
+                elif event.type == "reasoning":
+                    state["reasoning"].append(event.text)
+                    yield AgentEvent("reasoning", event.text)
+
+            broken = any(
+                event.type == "tool_calls"
+                and any(
+                    call.error and "Could not parse tool arguments" in call.error
+                    for call in event.tool_calls
                 )
-            elif event.type == "done":
-                state["finish_reason"] = event.finish_reason
-                yield AgentEvent("done", event.finish_reason)
+                for event in tool_events
+            )
+            if broken and max_tokens < 8192:
+                max_tokens = min(8192, max_tokens * 2)
+                retrying = True
+                runlog.log(
+                    {
+                        "type": "tool_call_retry",
+                        "reason": "truncated JSON arguments",
+                        "max_tokens": max_tokens,
+                    }
+                )
+                continue
+
+            for event in tool_events:
+                if event.type == "tool_calls":
+                    state["tool_calls"] = event.tool_calls
+                elif event.type == "usage":
+                    state["usage"].update(event.usage)
+                    completion = event.usage.get("output_tokens")
+                    if isinstance(completion, int):
+                        state["gen_tokens_total"] += completion
+                    gen_ms = event.usage.get("gen_ms")
+                    if isinstance(gen_ms, (int, float)):
+                        state["gen_ms_total"] += float(gen_ms)
+                    # Cumulative across tool steps: one stats line for the whole
+                    # turn, computed from the same generation counters everywhere.
+                    yield AgentEvent(
+                        "usage",
+                        {
+                            **event.usage,
+                            "output_tokens": state["gen_tokens_total"],
+                            "gen_ms": round(state["gen_ms_total"], 1),
+                            # Real prompt_n from llama.cpp for this step,
+                            # including tool outputs; the UI shows ctx usage.
+                            "prompt_tokens": state["usage"].get("input_tokens", 0),
+                        },
+                    )
+                elif event.type == "done":
+                    state["finish_reason"] = event.finish_reason
+                    yield AgentEvent("done", event.finish_reason)
+            break
 
     async def _continue_answer(
         self,

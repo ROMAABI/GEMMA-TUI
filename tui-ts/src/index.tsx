@@ -30,7 +30,7 @@ async function main() {
 
   // Create chat state machine.
   const prefs = loadPrefs()
-  const chat = createChat(client)
+  const chat = createChat(client, prefs)
 
   // Load server state.
   try {

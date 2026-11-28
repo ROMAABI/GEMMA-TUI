@@ -5,6 +5,8 @@
  * with a one-time link, then talks JSON + SSE over the authenticated origin.
  */
 
+import type { Sampling } from "./prefs"
+
 export interface AttachmentDescriptor {
   id: string
   name: string
@@ -515,10 +517,14 @@ export class GemmaClient {
     signal?: AbortSignal,
     context?: string,
     attachments?: AttachmentDescriptor[],
+    sampling?: Sampling,
+    system?: string,
   ): Promise<void> {
     const body: Record<string, unknown> = { session_id: sessionId, message }
     if (context) body.context = context
     if (attachments?.length) body.attachments = attachments
+    if (sampling) body.sampling = sampling
+    if (system) body.system = system
     const response = await fetch(`${this.base}/api/chat`, {
       method: "POST",
       headers: this.headers({ Accept: "text/event-stream" }),
@@ -575,10 +581,14 @@ export class GemmaClient {
     signal?: AbortSignal,
     context?: string,
     attachments?: AttachmentDescriptor[],
+    sampling?: Sampling,
+    system?: string,
   ): Promise<void> {
     const body: Record<string, unknown> = { session_id: sessionId, message }
     if (context) body.context = context
     if (attachments?.length) body.attachments = attachments
+    if (sampling) body.sampling = sampling
+    if (system) body.system = system
     const response = await fetch(`${this.base}/api/agent`, {
       method: "POST",
       headers: this.headers({ Accept: "text/event-stream" }),

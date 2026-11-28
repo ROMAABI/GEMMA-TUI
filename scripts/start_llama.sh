@@ -11,4 +11,4 @@ printf '%s\n' "$MODEL" > "$STATE_DIR/llama-model"
 exec "$HOME/.local/bin/llama-server" \
     -m "$MODEL" \
     --host 127.0.0.1 --port 8080 \
-    --ctx-size 8192 --parallel 1 -t 12
+    --ctx-size 32768 --parallel 1 -t 12

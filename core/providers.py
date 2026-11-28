@@ -12,7 +12,7 @@ from typing import Any, AsyncIterator
 import httpx
 
 from config.settings import Settings
-from core.client import LlamaClient, collapse_system_messages
+from core.client import LlamaClient, REPETITION_PARAMS, collapse_system_messages
 from core.tools import parse_tool_calls, strip_tool_calls
 from utils import runlog
 
@@ -159,6 +159,8 @@ class NativeToolProvider:
         stream: bool,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        top_p: float | None = None,
+        repeat_penalty: float | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self.settings.model,
@@ -169,7 +171,12 @@ class NativeToolProvider:
             # Reuse the server's prompt cache across steps/turns. llama.cpp
             # ignores unknown OAI fields, so this is safe everywhere.
             "cache_prompt": True,
+            **REPETITION_PARAMS,
         }
+        if top_p is not None:
+            payload["top_p"] = top_p
+        if repeat_penalty is not None:
+            payload["repeat_penalty"] = repeat_penalty
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
@@ -207,9 +214,12 @@ class NativeToolProvider:
         *,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        top_p: float | None = None,
+        repeat_penalty: float | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         payload = self._payload(
-            messages, tools, stream=True, temperature=temperature, max_tokens=max_tokens
+            messages, tools, stream=True, temperature=temperature, max_tokens=max_tokens,
+            top_p=top_p, repeat_penalty=repeat_penalty,
         )
         timeout = httpx.Timeout(connect=10.0, read=None, write=30.0, pool=10.0)
         url = f"{self.settings.base_url}/v1/chat/completions"
@@ -550,6 +560,7 @@ class ProviderRouter:
         *,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        **_kwargs: Any,
     ) -> AsyncIterator[ProviderEvent]:
         if self.mode == "prompt":
             self.last_provider = "prompt"

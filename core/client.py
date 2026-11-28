@@ -89,6 +89,11 @@ def _parse_gemma_prompt(prompt: str) -> tuple[list[dict[str, str]], bool]:
     return messages, no_thinking
 
 
+# Qwen 4B on CPU loops at low temperatures (e.g. "unna unna unna...").
+# A light repetition/presence penalty keeps focused replies without looping.
+REPETITION_PARAMS: dict[str, float] = {"repeat_penalty": 1.1, "presence_penalty": 0.1}
+
+
 def _clean_output(text: str) -> str:
     return _THOUGHT_PATTERN.sub("", text).strip()
 
@@ -183,11 +188,18 @@ class LlamaClient:
         temperature: float | None = None,
         n_predict: int = 512,
         prefill: bool = False,
+        top_p: float | None = None,
+        repeat_penalty: float | None = None,
     ) -> AsyncIterator[str]:
         temp = self.settings.temperature if temperature is None else temperature
         if not _is_gemma_model(self.settings.model):
             async for chunk in self._stream_openai_chat(
-                messages, temperature=temp, n_predict=n_predict, prefill=prefill
+                messages,
+                temperature=temp,
+                n_predict=n_predict,
+                prefill=prefill,
+                top_p=top_p,
+                repeat_penalty=repeat_penalty,
             ):
                 yield chunk
             return
@@ -202,7 +214,12 @@ class LlamaClient:
             "stream": True,
             "cache_prompt": True,
             "stop": ["<end_of_turn>"],
+            **REPETITION_PARAMS,
         }
+        if top_p is not None:
+            payload["top_p"] = top_p
+        if repeat_penalty is not None:
+            payload["repeat_penalty"] = repeat_penalty
 
         in_preamble = True
         buf = ""
@@ -274,6 +291,8 @@ class LlamaClient:
         temperature: float,
         n_predict: int,
         prefill: bool,
+        top_p: float | None = None,
+        repeat_penalty: float | None = None,
     ) -> AsyncIterator[str]:
         """Stream chat via /v1/chat/completions for non-Gemma models."""
         payload: dict[str, Any] = {
@@ -282,7 +301,12 @@ class LlamaClient:
             "temperature": temperature,
             "stream": True,
             "cache_prompt": True,
+            **REPETITION_PARAMS,
         }
+        if top_p is not None:
+            payload["top_p"] = top_p
+        if repeat_penalty is not None:
+            payload["repeat_penalty"] = repeat_penalty
         if _is_thinking_model(self.settings.model):
             payload["chat_template_kwargs"] = {"enable_thinking": False}
 

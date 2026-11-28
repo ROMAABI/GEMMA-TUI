@@ -92,9 +92,11 @@ wget -O models/Qwen3.5-9B-abliterated.Q4_K_M.gguf \
 # wget -O models/mmproj-f16.gguf \
 #   https://huggingface.co/Abiray/Qwen3.5-9B-abliterated-GGUF/resolve/main/mmproj-f16.gguf
 
-# 3. Start llama.cpp server (add --mmproj for attachments)
+# 3. Start llama.cpp server
 llama-server -m models/Qwen3.5-9B-abliterated.Q4_K_M.gguf \
-  --mmproj models/gemma-4-E4B-it-mmproj-BF16.gguf --port 8080 --ctx-size 8192
+  --port 8080 --ctx-size 32768
+# For image/video attachments, download the optional mmproj above and append:
+#   --mmproj models/mmproj-f16.gguf
 
 # 4. Launch (new terminal)
 gemma-local
@@ -163,11 +165,13 @@ Start server with your pick:
 
 ```bash
 llama-server -m models/gemma-3-4b-it-Q4_K_M.gguf \
-  --port 8080 --ctx-size 8192 --n-predict -1
+  --port 8080 --ctx-size 32768 --n-predict -1
 curl http://127.0.0.1:8080/health  # should return 200
 ```
 
 The `gemma-llama-server` user service picks automatically: **`Qwen3.5-4B_Abliterated.Q4_K_M`** while the laptop is on battery, **`Qwen3.5-9B-abliterated.Q4_K_M`** when plugged in. A 30-second user timer (`gemma-power-model.timer`) restarts the server when the power source changes. Force a choice with `GEMMA_FORCE_MODEL=small` or `=large` for the service environment.
+
+Context is set to **32,768 tokens** (`--ctx-size 32768`). At that size the Qwen3.5-9B KV cache uses ~4 GiB and llama.cpp settles around ~9 GiB RAM. Prefill cost is proportional to the tokens actually sent, so a short task is still fast — only a conversation that actually fills 32K tokens becomes slow on CPU.
 
 ### (Optional) Private web search with SearXNG
 
@@ -348,8 +352,9 @@ a text-only chip. Nothing is drawn that can shift the composer layout.
 Requires vision-enabled llama.cpp:
 
 ```bash
-llama-server -m models/gemma-4-E4B-it-ultra-uncensored-heretic-Q4_K_M.gguf \
-  --mmproj models/gemma-4-E4B-it-mmproj-BF16.gguf --port 8080 --ctx-size 8192
+llama-server -m models/Qwen3.5-9B-abliterated.Q4_K_M.gguf \
+  --port 8080 --ctx-size 32768
+# Add --mmproj models/mmproj-f16.gguf if you downloaded the optional projector.
 ```
 
 Without `--mmproj`, attaching an image/video returns a clear error instead of
@@ -422,7 +427,7 @@ Resolved order: `defaults` → config file → env vars → live server auto-det
 base_url = "http://127.0.0.1:8080"
 
 [model]
-name = "gemma-4-E4B-it-ultra-uncensored-heretic-Q4_K_M"
+name = "Qwen3.5-9B-abliterated.Q4_K_M"
 temperature = 0.7
 
 [ui]
@@ -510,7 +515,7 @@ GEMMA-TUI/
 | Garbled theme | `/theme system` for transparent terminal, or try `tokyo-night` |
 | Agent writes to wrong folder | `/agent status`, then `/agent dir <correct-path>` |
 | `Ctrl+C` / `/stop` does nothing | Cancelling is handled by the app; check `Ctrl+X s`. Resize debug log: `~/.local/state/gemma/tui-debug.log` |
-| Image/video attachment rejected | Restart llama-server with `--mmproj models/gemma-4-E4B-it-mmproj-BF16.gguf` (vision disabled otherwise) |
+| Image/video attachment rejected | Restart llama-server with `--mmproj models/mmproj-f16.gguf` if you downloaded the optional projector (vision disabled otherwise) |
 | Video attachment fails | Install ffmpeg: `sudo pacman -S ffmpeg`; PDF needs `sudo pacman -S poppler` |
 | `Ctrl+C` cancelled a turn but the reply looks odd | Cancelled partials are marked `stopped` and keep the stats line; resend or `/clear` |
 | Where is my data? | `gemma-local config` shows paths; sessions in platform data dir, attachments in `~/.local/share/gemma/attachments/<session_id>/`, server log in `~/.local/state/gemma/server.log` |

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -38,6 +39,12 @@ async def test_web_search_tool_formats_results(monkeypatch: pytest.MonkeyPatch) 
     assert result.ok
     assert "flipkart.com/x7" in result.output
     assert "₹23,999" in result.output
+
+
+def test_tool_context_expands_home_in_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    context = ToolContext(root=tmp_path)
+    assert context.resolve("~/snake/snake.py") == tmp_path / "snake" / "snake.py"
 
 
 def test_list_dir_is_non_recursive_and_capped(tmp_path: Path) -> None:
@@ -86,6 +93,55 @@ async def test_length_finish_reason_triggers_one_continuation() -> None:
     continuation = await agent._continue_answer([{"role": "user", "content": "price?"}], "₹23,999 for the 8 GB + 256")
     assert continuation == "GB + 256 GB costs ₹23,999 on Flipkart."
     assert SEARCH_ANSWER_MAX_TOKENS == 400
+
+
+def test_compact_tool_schema_keeps_tools_without_property_docs() -> None:
+    registry = build_default_registry()
+    full = registry.openai_tools(compact=False)
+    compact = registry.openai_tools()
+    assert [t["function"]["name"] for t in compact] == [t["function"]["name"] for t in full]
+    compact_parameters = compact[0]["function"]["parameters"]
+    assert "description" not in json.dumps(compact_parameters)
+    assert compact_parameters["required"] == full[0]["function"]["parameters"]["required"]
+
+
+@pytest.mark.asyncio
+async def test_truncated_tool_call_is_retried_with_larger_limit() -> None:
+    from core.providers import ProviderEvent, ToolCall
+
+    class FakeProvider:
+        def __init__(self) -> None:
+            self.calls: list[int] = []
+
+        async def stream(self, messages, tools, **kwargs):
+            max_tokens = kwargs["max_tokens"]
+            self.calls.append(max_tokens)
+            if len(self.calls) == 1:
+                broken = ToolCall(
+                    id="call_0",
+                    name="write", arguments={}, raw_arguments='{"path":"/tmp/x"',
+                    error="Could not parse tool arguments as JSON: {\"path\":\"/tmp/x\"",
+                )
+                yield ProviderEvent(type="tool_calls", tool_calls=[broken])
+                yield ProviderEvent(type="done", finish_reason="length")
+            else:
+                good = ToolCall(id="call_0", name="write", arguments={"path": "/tmp/x"}, raw_arguments='{"path":"/tmp/x"}')
+                yield ProviderEvent(type="tool_calls", tool_calls=[good])
+                yield ProviderEvent(type="done", finish_reason="stop")
+
+    provider = FakeProvider()
+    agent = object.__new__(AgentOrchestrator)
+    agent.provider = provider
+    agent.registry = build_default_registry()
+    agent.settings = SimpleNamespace(temperature=0.7, agent_max_tokens=64)
+    state: dict[str, object] = {"text": [], "reasoning": [], "tool_calls": [], "usage": {}, "gen_tokens_total": 0, "gen_ms_total": 0}
+
+    events = [event async for event in agent._stream_step([], state)]
+
+    assert provider.calls == [64, 128]
+    assert [event.type for event in events] == ["done"]
+    assert state["tool_calls"][0].arguments == {"path": "/tmp/x"}
+    assert state["finish_reason"] == "stop"
 
 
 def test_context_limit_uses_server_props(monkeypatch: pytest.MonkeyPatch) -> None:

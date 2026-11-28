@@ -656,6 +656,15 @@ export function App(props: { chat: Chat }) {
         )
         return true
       }
+      case "/system": {
+        if (!arg) {
+          flash(`System prompt: ${props.chat.systemPrompt().slice(0, 160)}…`)
+        } else {
+          props.chat.setSystemPrompt(arg)
+          flash("System prompt updated and saved")
+        }
+        return true
+      }
       case "/config": {
         const i = info()
         if (!i) {

@@ -269,7 +269,13 @@ class GemmaWebServer:
         self.titles.submit(session_id, first, reply[:300], exchange=exchange)
         self.titles.maybe_refresh_drift(session_id, exchange)
 
-    async def _pump_chat(self, handler: "_Handler", session_id: str, context: str = "") -> None:
+    async def _pump_chat(
+        self,
+        handler: "_Handler",
+        session_id: str,
+        context: str = "",
+        sampling: dict[str, Any] | None = None,
+    ) -> None:
         client = LlamaClient(self.settings)
         from core.attachments import multimodal_messages
         from core.providers import NativeToolProvider
@@ -297,7 +303,13 @@ class GemmaWebServer:
                         prompt_tokens = int(event.usage.get("input_tokens") or 0)
                         tokens = max(tokens, int(event.usage.get("output_tokens") or tokens))
             else:
-                async for chunk in client.stream_chat(messages, prefill=bool(context)):
+                async for chunk in client.stream_chat(
+                    messages,
+                    prefill=bool(context),
+                    temperature=(sampling or {}).get("temperature"),
+                    top_p=(sampling or {}).get("top_p"),
+                    repeat_penalty=(sampling or {}).get("repeat_penalty"),
+                ):
                     if not chunk:
                         continue
                     if first_at is None:
@@ -647,6 +659,20 @@ class _Handler(BaseHTTPRequestHandler):
         if not session_id or self.gemma.store.get_session(session_id) is None:
             session_id = self.gemma.store.create_session()
         context = str(body.get("context") or "").strip()
+        system = str(body.get("system") or "").strip()
+        if system:
+            context = f"{system}\n\n{context}".strip()
+        raw_sampling = body.get("sampling") or {}
+        sampling: dict[str, Any] = {}
+        if isinstance(raw_sampling, dict):
+            for key, low, high in (
+                ("temperature", 0.0, 2.0),
+                ("top_p", 0.0, 1.0),
+                ("repeat_penalty", 0.5, 2.0),
+            ):
+                value = raw_sampling.get(key)
+                if isinstance(value, (int, float)) and low <= value <= high:
+                    sampling[key] = float(value)
 
         self.close_connection = True
         self.send_response(200)
@@ -663,7 +689,9 @@ class _Handler(BaseHTTPRequestHandler):
 
                 attachments = [relocate_attachment(dict(a), session_id) for a in attachments]
                 self.gemma._log_attachments(session_id, attachments)
-            run = self.gemma.agent.start(session_id, message, context=context, attachments=attachments)
+            run = self.gemma.agent.start(
+                session_id, message, context=context, attachments=attachments, sampling=sampling
+            )
             self.emit({"type": "run", "run_id": run.run_id, "session_id": session_id})
             self._drain(run)
         except (BrokenPipeError, ConnectionResetError):
@@ -1250,6 +1278,20 @@ class _Handler(BaseHTTPRequestHandler):
             metadata={"attachments": attachments},
         )
         context = str(body.get("context") or "").strip()
+        system = str(body.get("system") or "").strip()
+        if system:
+            context = f"{system}\n\n{context}".strip()
+        raw_sampling = body.get("sampling") or {}
+        sampling: dict[str, Any] = {}
+        if isinstance(raw_sampling, dict):
+            for key, low, high in (
+                ("temperature", 0.0, 2.0),
+                ("top_p", 0.0, 1.0),
+                ("repeat_penalty", 0.5, 2.0),
+            ):
+                value = raw_sampling.get(key)
+                if isinstance(value, (int, float)) and low <= value <= high:
+                    sampling[key] = float(value)
         with self.gemma._inflight_lock:
             self.gemma._chat_inflight += 1
 
@@ -1264,7 +1306,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.emit({"type": "start", "session_id": session_id})
         try:
-            asyncio.run(self.gemma._pump_chat(self, session_id, context))
+            asyncio.run(self.gemma._pump_chat(self, session_id, context, sampling))
         except (BrokenPipeError, ConnectionResetError):
             pass
         finally:

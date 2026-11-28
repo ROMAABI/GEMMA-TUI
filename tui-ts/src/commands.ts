@@ -20,6 +20,7 @@ export const TUI_COMMANDS: CommandDef[] = [
   { name: "/sidebar", description: "Toggle or show/hide the sidebar (ctrl+b)" },
   { name: "/history", description: "List saved sessions" },
   { name: "/config", description: "Show current config" },
+  { name: "/system", description: "Show or set the chat system prompt" },
   { name: "/web", description: "Pair a browser (prints a link)" },
   { name: "/help", description: "Show commands and keys" },
   { name: "/exit", description: "Quit" },

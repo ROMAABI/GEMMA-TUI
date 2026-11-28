@@ -41,6 +41,7 @@ class AgentRun:
     events: "queue.Queue[dict[str, Any] | None]" = field(default_factory=queue.Queue)
     future: Any = None
     aborted: bool = False
+    sampling: dict[str, float] = field(default_factory=dict)
 
     def emit(self, payload: dict[str, Any]) -> None:
         self.events.put(payload)
@@ -317,6 +318,7 @@ class AgentRuntime:
         message: str,
         context: str = "",
         attachments: list[dict[str, Any]] | None = None,
+        sampling: dict[str, float] | None = None,
     ) -> AgentRun:
         """Persist the user turn and launch an agent run; drain ``run.events``."""
         if message.strip():
@@ -330,6 +332,7 @@ class AgentRuntime:
             run_id=secrets.token_urlsafe(9),
             session_id=session_id,
             attachments=attachments or [],
+            sampling=sampling or {},
         )
         with self._lock:
             self._runs[run.run_id] = run
@@ -371,6 +374,7 @@ class AgentRuntime:
                 skills=self._skills,
                 provider_mode=getattr(self.settings, "provider", "auto"),
                 extra_context=context,
+                sampling=run.sampling,
             )
             messages = self.store.context_messages(run.session_id)
             from core.attachments import multimodal_messages, recent_attachment_messages

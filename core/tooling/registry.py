@@ -42,8 +42,8 @@ class ToolRegistry:
     def specs(self) -> list[ToolSpec]:
         return list(self._tools.values())
 
-    def openai_tools(self) -> list[dict[str, Any]]:
-        return [spec.openai_schema() for spec in self._tools.values()]
+    def openai_tools(self, compact: bool = True) -> list[dict[str, Any]]:
+        return [spec.openai_schema(compact=compact) for spec in self._tools.values()]
 
     def prompt_catalog(self) -> str:
         """Human-readable catalog used by the prompt-based fallback."""
