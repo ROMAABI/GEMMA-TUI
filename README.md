@@ -4,7 +4,7 @@
 > **Chat, code, search the web, and run an autonomous ReAct agent — 100% offline, zero API bills, zero data leaks.**
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue?style=for-the-badge)](https://www.python.org/)
-[![Textual](https://img.shields.io/badge/Textual-TUI-orange?style=for-the-badge)](https://textual.textualize.io/)
+[![OpenTUI](https://img.shields.io/badge/OpenTUI-Bun_%2B_Solid-orange?style=for-the-badge)](https://github.com/sst/opentui)
 [![Local First](https://img.shields.io/badge/100%25-local-green?style=for-the-badge)](https://github.com/ggml-org/llama.cpp)
 [![Agent](https://img.shields.io/badge/agent-ReAct_tools-success?style=for-the-badge)](#-coding-agent-mode)
 [![Search](https://img.shields.io/badge/search-SearXNG_RAG-cyan?style=for-the-badge)](#-web-search--rag-pipeline)
@@ -218,7 +218,7 @@ gemma-local web             # standalone: prints "Pair: http://127.0.0.1:47317/p
 
 The TUI starts a local server that serves the React app from `web/dist` and the
 `/api` routes from `core/webui.py`; `/web` (or `Ctrl+W`) mints a one-time
-pairing link: the classic TUI opens it in your browser, the OpenTUI client shows
+pairing link: `/web` opens it in your browser, and the OpenTUI client shows
 it above the chat (click it to copy). Links work once and expire after five minutes;
 opening one sets an `HttpOnly` session cookie (30 days) and redirects to the app. The browser and the terminal
 share one SQLite session store, so chats started in either show up in both. The
@@ -251,8 +251,8 @@ another empty chat without creating a DB row until the first message is sent.
 | `/mode [chat\|agent]` | `/mode agent` — force coding agent |
 | `/agent [on\|off\|status\|dir <path>]` | `/agent dir ~/projects/myapp` — set sandbox |
 | `/web` | open the web UI in a browser (pairing link, shared sessions) |
-| `/websearch [on\|off\|status\|test <q>\|url <url>]` | `/websearch test latest textual release` |
-| `/theme [name]` | `/theme nord` (classic) · `/theme violet`, `/theme dark` (OpenTUI) |
+| `/websearch [on\|off\|status\|test <q>\|url <url>]` | `/websearch test latest OpenTUI release` |
+| `/theme [name]` | `/theme opencode`, `/theme violet`, `/theme dark`, `/theme light`, `/theme system` (OpenTUI) |
 | `/model [name]` | `/model gemma-3-4b-it` |
 | `/sidebar [show\|hide\|toggle]` | sidebar nav |
 | `/copy` | copy last reply |
@@ -301,8 +301,7 @@ The OpenTUI client has its own theme model (`/theme`): names `opencode`,
 `violet`, `cyan`, `emerald`, `system`, plus `mode` `system` (follow the
 terminal's light/dark appearance), `dark` or `light`. The `system` theme reads
 the terminal palette over OSC and repaints when the terminal changes; choices
-are saved in `~/.config/gemma-local/tui-ts.json`. The classic Textual themes
-above are unchanged.
+are saved in `~/.config/gemma-local/tui-ts.json`.
 
 The same file holds the editable system prompt and sampling defaults:
 ```json
@@ -409,8 +408,8 @@ Safety: paths are resolved against workspace root — `../../etc` escapes are re
 ```
 > /websearch on
 > who is the current chief minister of Tamil Nadu?
-> latest textualize textual release notes?
-> /websearch test textual python TUI
+> latest OpenTUI release notes?
+> /websearch test OpenTUI python TUI
 ```
 
 Flow (`core/orchestrator.py` + `core/research.py`):
@@ -500,8 +499,8 @@ GEMMA-TUI/
 │   ├── schema.py
 │   └── store.py            # SQLite sessions/messages
 ├── tui/
-│   ├── app.py              # Textual app (~2600 lines): chat, sidebar, palette, streaming
-│   └── themes.py           # 7 themes + CSS generator
+│   ├── app.py              # legacy prompt source (SYSTEM_PROMPT); not the active UI
+│   └── themes.py           # legacy Textual themes (inactive)
 ├── tui-ts/                 # OpenTUI client (Bun + Solid)
 │   ├── src/app.tsx         # shell, keyboard dispatcher, overlays, command palette
 │   ├── src/chat.ts         # sessions, streaming, attachments, cancel/queue
@@ -553,7 +552,7 @@ Contributions welcome — open an issue, keep PRs <300 lines, no generated asset
 ## 🙏 Credits
 
 - [llama.cpp](https://github.com/ggml-org/llama.cpp) — local inference server
-- [Textual](https://textual.textualize.io/) — TUI framework
+- [OpenTUI](https://github.com/sst/opentui) — terminal UI framework
 - [SearXNG](https://github.com/searxng/searxng) — metasearch
 - [Jina Reader](https://jina.ai/reader/) — clean page extract
 - Google Gemma weights (user-supplied, see their license on Hugging Face)
