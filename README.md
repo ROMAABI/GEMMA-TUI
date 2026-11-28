@@ -261,6 +261,7 @@ another empty chat without creating a DB row until the first message is sent.
 | `/stop` | cancel the running agent turn |
 | `/logs` | tail `~/.local/state/gemma/server.log` in a panel |
 | `/rename <name>` · `/stats` · `/config` | rename / token stats / dump config |
+| `/system [text]` | show or set the chat system prompt (OpenTUI) |
 | `/exit` | quit |
 
 Type `/` for autocomplete, or `Ctrl+P` for palette.
@@ -302,6 +303,16 @@ terminal's light/dark appearance), `dark` or `light`. The `system` theme reads
 the terminal palette over OSC and repaints when the terminal changes; choices
 are saved in `~/.config/gemma-local/tui-ts.json`. The classic Textual themes
 above are unchanged.
+
+The same file holds the editable system prompt and sampling defaults:
+```json
+{
+  "systemPrompt": "",
+  "sampling": { "temperature": 0.6, "top_p": 0.9, "repeat_penalty": 1.1, "no_think": true }
+}
+```
+`/system <text>` updates `systemPrompt`. Sampling is sent to llama.cpp;
+`no_think` disables Qwen "thinking" mode for faster casual chat.
 
 ### Providers
 
@@ -428,7 +439,7 @@ base_url = "http://127.0.0.1:8080"
 
 [model]
 name = "Qwen3.5-9B-abliterated.Q4_K_M"
-temperature = 0.7
+temperature = 0.6
 
 [ui]
 title = "Gemma Local Assistant"
